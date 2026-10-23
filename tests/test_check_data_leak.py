@@ -53,7 +53,9 @@ def test_rule_d_skips_unparseable_lines_to_first_record(tmp_path):
 
 def test_rule_e_prediction_file_allowed_any_order(tmp_path):
     rel = write(
-        tmp_path, "predictions/p.csv", "winner_tie,id,winner_model_b,winner_model_a\n1,0.3,0.3,0.4\n"
+        tmp_path,
+        "predictions/p.csv",
+        "winner_tie,id,winner_model_b,winner_model_a\n1,0.3,0.3,0.4\n",
     )
     assert rules(tmp_path, [rel]) == set()
 
