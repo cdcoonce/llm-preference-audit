@@ -1,0 +1,16 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+
+# Data: raw and derived data is never committed (CC BY-NC 4.0, public repo)
+data/
+
+# Secrets and notebooks
+.env
+*.ipynb_checkpoints
+.ipynb_checkpoints/
