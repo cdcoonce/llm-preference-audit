@@ -1,4 +1,4 @@
-.PHONY: setup lint format test leak-check ci data
+.PHONY: setup lint format test leak-check ci data data-kaggle split profile
 
 setup:
 	uv sync --group dev
@@ -24,3 +24,6 @@ ci:
 
 data:
 	uv run python scripts/download_data.py
+
+data-kaggle:
+	uv run python scripts/download_kaggle.py
