@@ -5,14 +5,19 @@ then `train.py` with fixed arguments. Refuses unless the pinned SHA is HEAD, `ll
 and `kaggle/` are clean, and the SHA exists on the remote. `--dry` prints instead of running.
 
   uv run python kaggle/rung5_deberta/push.py --username U --mode probe --tag probe1 --dry
-  uv run python kaggle/rung5_deberta/push.py --username U --mode folds --folds 0,1,2,3,4 --tag full
-  uv run python kaggle/rung5_deberta/push.py --username U --tag full --fetch
+  uv run python kaggle/rung5_deberta/push.py --username U --mode folds --folds 0,1 --tag f01
+  uv run python kaggle/rung5_deberta/push.py --username U --mode folds --folds 0 --middle-share 0 --tag abl0
+  uv run python kaggle/rung5_deberta/push.py --username U --mode folds --tag f01 --fetch
+
+Each folds tag gets its own kernel slug (`llm-pref-rung5-deberta-<tag>`), so sessions can run
+side by side and outputs (data/kaggle_out/<tag>/) never overwrite each other.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -25,8 +30,21 @@ OUT_ROOT = Path("data/kaggle_out")
 CHECKED_DIRS = ("llm_preference_audit", "kaggle")
 COMPETITION = "llm-classification-finetuning"
 ACCELERATOR = "NvidiaTeslaT4"
+BASE_SLUG = "llm-pref-rung5-deberta"
 DEFAULT_REPO = "cdcoonce/llm-preference-audit"
 FUTURE = "from __future__ import annotations\n"
+
+
+def kernel_slug(a: argparse.Namespace) -> str:
+    """Probe keeps the base slug; a folds session gets `<base>-<tag>` (or an explicit --slug)."""
+    if a.slug:
+        return a.slug
+    if a.mode == "probe":
+        return BASE_SLUG
+    tag = a.tag.lower()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", tag):
+        raise SystemExit(f"--tag {a.tag!r} must be lowercase letters, digits and hyphens")
+    return f"{BASE_SLUG}-{tag}"
 
 
 def git(*args: str) -> str:
@@ -85,8 +103,8 @@ def render(a: argparse.Namespace, sha: str) -> Path:
     code_file = f"rung5_{a.mode}.py"
     (build / code_file).write_text(code)
     meta = {
-        "id": f"{a.username}/{a.slug}",
-        "title": a.slug,
+        "id": f"{a.username}/{kernel_slug(a)}",
+        "title": kernel_slug(a),
         "code_file": code_file,
         "language": "python",
         "kernel_type": "script",
@@ -111,7 +129,7 @@ def run(cmd: list[str], dry: bool) -> None:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--username", required=True)
-    ap.add_argument("--slug", default="llm-pref-rung5-deberta")
+    ap.add_argument("--slug", default=None, help="override the per-tag kernel slug")
     ap.add_argument("--mode", choices=["probe", "folds"], default="probe")
     ap.add_argument("--folds", default="0,1,2,3,4")
     ap.add_argument("--middle-share", type=float, default=0.2)
@@ -126,7 +144,9 @@ def main(argv=None) -> int:
     ap.add_argument("--dry", action="store_true", help="print commands instead of running them")
     ap.add_argument("--fetch", action="store_true", help="status + download output, no push")
     a = ap.parse_args(argv)
-    ref = f"{a.username}/{a.slug}"
+    ref = f"{a.username}/{kernel_slug(a)}"
+    if a.mode == "folds" and a.folds.strip() == "":
+        raise SystemExit("--folds must list at least one fold")
     if a.fetch:
         dest = OUT_ROOT / a.tag
         run(["kaggle", "kernels", "status", ref], a.dry)

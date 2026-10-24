@@ -190,18 +190,51 @@ def merge_oof(frames: Iterable[pd.DataFrame], cv_ids: Iterable[int]) -> pd.DataF
     return merged.sort_values("id").reset_index(drop=True)
 
 
+def water_level_cut(lengths: Sequence[int], budget: int) -> list[int]:
+    """Final (prompt, a, b) token counts after a symmetric water-level cut to `budget` tokens.
+
+    Every field is capped at a common level h (the largest with sum(min(L, h)) <= budget). Leftover
+    tokens go one each to capped fields, never favouring a or b by position: the prompt first, then
+    a and b together or not at all (so the result may end one token under the budget).
+    """
+    L = [int(x) for x in lengths]
+    if sum(L) <= budget:
+        return L
+    if budget < 0:
+        raise ValueError("negative token budget")
+    lo, hi = 0, max(L)
+    while lo < hi:  # largest h with sum(min(L, h)) <= budget
+        mid = (lo + hi + 1) // 2
+        if sum(min(x, mid) for x in L) <= budget:
+            lo = mid
+        else:
+            hi = mid - 1
+    h = lo
+    out = [min(x, h) for x in L]
+    rest = budget - sum(out)
+    if rest > 0 and L[0] > h:
+        out[0] += 1
+        rest -= 1
+    a_cap, b_cap = L[1] > h, L[2] > h
+    if a_cap and b_cap:
+        if rest >= 2:
+            out[1] += 1
+            out[2] += 1
+    elif a_cap and rest >= 1:
+        out[1] += 1
+    elif b_cap and rest >= 1:
+        out[2] += 1
+    return out
+
+
 def build_input_ids(prompt_ids, a_ids, b_ids, cls_id: int, sep_id: int, limit: int) -> list[int]:
-    """[CLS] prompt [SEP] a [SEP] b [SEP]; over `limit`, hard-cut the longest field from its end."""
+    """[CLS] prompt [SEP] a [SEP] b [SEP]; over `limit`, a symmetric water-level hard cut from ends."""
     fields = [list(prompt_ids), list(a_ids), list(b_ids)]
-    over = sum(map(len, fields)) + N_SPECIAL - limit
-    while over > 0:
-        i = max(range(3), key=lambda k: len(fields[k]))
-        if not fields[i]:
-            raise ValueError(f"limit {limit} is smaller than the special tokens")
-        cut = min(over, len(fields[i]))
-        del fields[i][len(fields[i]) - cut :]
-        over -= cut
-    p, a, b = fields
+    budget = limit - N_SPECIAL
+    if budget < 0:
+        raise ValueError(f"limit {limit} is smaller than the special tokens")
+    keep = water_level_cut([len(f) for f in fields], budget)
+    p, a, b = (f[:k] for f, k in zip(fields, keep, strict=True))
     return [cls_id, *p, sep_id, *a, sep_id, *b, sep_id]
 
 
@@ -220,3 +253,47 @@ def length_grouped_batches(
         batches += [chunk[i : i + batch_size] for i in range(0, len(chunk), batch_size)]
     perm = rng.permutation(len(batches))
     return [batches[i] for i in perm]
+
+
+CONFIG_KEYS = ("git_sha", "t", "middle_share", "model", "epochs")
+
+
+def validate_fold_parts(
+    parts: Sequence[tuple[int, pd.DataFrame, dict]], manifest_cv: pd.DataFrame
+) -> pd.DataFrame:
+    """Merge per-fold OOF parts after checking each against its log and the split manifest.
+
+    `parts` is (fold, oof frame, log dict). Requires: no logged error, ids of fold k exactly the
+    manifest's fold-k cv ids, one shared value of CONFIG_KEYS across all logs, folds 0-4 once each.
+    """
+    folds_in_manifest = sorted(int(f) for f in manifest_cv["fold"].unique())
+    seen: list[int] = []
+    for fold, frame, log in parts:
+        if log.get("error"):
+            raise ValueError(f"fold {fold} log records an error: {log['error']}")
+        if int(log.get("fold", fold)) != int(fold):
+            raise ValueError(f"fold {fold} file has a log for fold {log.get('fold')}")
+        seen.append(int(fold))
+        want = set(manifest_cv.loc[manifest_cv["fold"] == fold, "id"].astype(int))
+        got = frame["id"].astype(int)
+        if got.duplicated().any():
+            raise ValueError(f"fold {fold} has duplicate ids")
+        if set(got) != want:
+            raise ValueError(
+                f"fold {fold} ids differ from the manifest's fold {fold}: "
+                f"{len(set(got) - want)} foreign, {len(want - set(got))} missing"
+            )
+    dup = sorted({f for f in seen if seen.count(f) > 1})
+    if dup:
+        raise ValueError(f"fold(s) {dup} supplied more than once")
+    if sorted(seen) != folds_in_manifest:
+        raise ValueError(f"missing fold(s) {sorted(set(folds_in_manifest) - set(seen))}")
+    for key in CONFIG_KEYS:
+        vals = {json_key(log.get(key)) for _, _, log in parts}
+        if len(vals) != 1:
+            raise ValueError(f"config mismatch across folds on {key!r}: {sorted(vals)}")
+    return merge_oof([f for _, f, _ in parts], manifest_cv["id"])
+
+
+def json_key(v) -> str:
+    return repr(v)

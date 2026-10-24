@@ -15,7 +15,7 @@ def _args(tmp_path, **kw):
     argv = ["--username", "u", "--mode", "folds", "--folds", "0,1", "--tag", "t1", "--dry"]
     return push.argparse.Namespace(
         username="u",
-        slug="s",
+        slug=None,
         mode="folds",
         folds="0,1",
         middle_share=0.2,
@@ -41,7 +41,7 @@ def test_render_script_and_metadata(tmp_path, monkeypatch):
     assert "'--git-sha', 'abc123'" in code and "'--tag', 't1'" in code
     assert code.index("generated kernel header") < code.index("import torch")
     meta = json.loads((build / "kernel-metadata.json").read_text())
-    assert meta["id"] == "u/s" and meta["is_private"] and meta["enable_gpu"]
+    assert meta["id"] == "u/llm-pref-rung5-deberta-t1" and meta["is_private"] and meta["enable_gpu"]
     assert meta["competition_sources"] == ["llm-classification-finetuning"]
     assert meta["code_file"] == "rung5_folds.py" and meta["kernel_type"] == "script"
 
@@ -67,3 +67,31 @@ def test_preflight_refuses_non_head_and_dirty(monkeypatch):
     calls["status"] = ""
     with pytest.raises(SystemExit, match="not on any remote"):
         push.preflight(None)
+
+
+def test_slug_per_tag_and_probe_keeps_base():
+    a, _ = _args(None)
+    assert push.kernel_slug(a) == "llm-pref-rung5-deberta-t1"
+    a.tag = "f01"
+    assert push.kernel_slug(a) == "llm-pref-rung5-deberta-f01"
+    a.tag = "Bad_Tag"
+    with pytest.raises(SystemExit, match="lowercase"):
+        push.kernel_slug(a)
+    a.mode = "probe"
+    assert push.kernel_slug(a) == "llm-pref-rung5-deberta"
+
+
+def test_fetch_uses_tag_slug_and_dir(capsys):
+    assert (
+        push.main(["--username", "u", "--mode", "folds", "--tag", "f01", "--fetch", "--dry"]) == 0
+    )
+    out = capsys.readouterr().out
+    assert "u/llm-pref-rung5-deberta-f01" in out and "data/kaggle_out/f01" in out
+
+
+def test_ablation_args_render(tmp_path, monkeypatch):
+    monkeypatch.setattr(push, "REPO_ROOT", tmp_path)
+    a, _ = _args(tmp_path)
+    a.folds, a.middle_share, a.tag = "0", 0.0, "abl0"
+    code = (push.render(a, "abc123") / "rung5_folds.py").read_text()
+    assert "'--middle-share', '0.0'" in code and "'--folds', '0'" in code

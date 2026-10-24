@@ -12,6 +12,8 @@ from llm_preference_audit.deberta_inputs import (
     oof_frame,
     prepare_rows,
     swap_example,
+    validate_fold_parts,
+    water_level_cut,
 )
 from llm_preference_audit.train_lgbm import TestSplitLeak
 
@@ -198,3 +200,80 @@ def test_merge_oof_coverage():
         merge_oof([fr([0, 1])], [0, 1, 2])
     with pytest.raises(ValueError, match="not cv"):
         merge_oof([fr([0, 1, 2, 9])], [0, 1, 2])
+
+
+def _cut(p, a, b, limit):
+    ids = build_input_ids([1] * p, [2] * a, [3] * b, 100, 101, limit)
+    return ids.count(1), ids.count(2), ids.count(3), len(ids)
+
+
+def test_hard_cut_example_is_balanced():
+    p, a, b, n = _cut(100, 900, 900, 1024)
+    assert (p, a, b) == (100, 460, 460) and n <= 1024
+
+
+def test_hard_cut_symmetric_bounded_and_nonempty():
+    for p in (0, 1, 50, 100, 400):
+        for a in (0, 1, 7, 300, 900, 1500):
+            for b in (0, 1, 8, 300, 900, 1500):
+                for limit in (4, 5, 6, 64, 513, 1024):
+                    if p + a + b + 4 > limit and limit < 4:
+                        continue
+                    r1 = _cut(p, a, b, limit)
+                    r2 = _cut(p, b, a, limit)
+                    assert (r1[0], r1[1], r1[2]) == (r2[0], r2[2], r2[1]), (p, a, b, limit)
+                    assert r1[3] <= limit
+                    kept = (r1[0], r1[1], r1[2])
+                    if p + a + b + 4 > limit and limit - 4 >= 3:
+                        # nothing emptied unless it started empty
+                        assert all(k > 0 or o == 0 for k, o in zip(kept, (p, a, b), strict=True))
+                    if p + a + b + 4 <= limit:
+                        assert kept == (p, a, b)
+                    else:
+                        assert r1[3] >= limit - 1  # at most one token under the limit
+
+
+def test_water_level_cut_ties_never_favour_a():
+    assert water_level_cut([0, 5, 5], 5) == [0, 2, 2]
+    assert water_level_cut([0, 5, 5], 7) == [0, 3, 3]
+    assert water_level_cut([3, 9, 9], 10) == [3, 3, 3]
+    assert water_level_cut([2, 9, 3], 8) == [2, 3, 3]
+    with pytest.raises(ValueError):
+        water_level_cut([1], -1)
+
+
+def _fold_manifest():
+    rows = [(i, i % 5) for i in range(10)]
+    return pd.DataFrame(rows, columns=["id", "fold"])
+
+
+def _part(fold, ids=None, **log):
+    m = _fold_manifest()
+    ids = list(m.loc[m["fold"] == fold, "id"]) if ids is None else ids
+    n = len(ids)
+    p = np.tile([0.5, 0.3, 0.2], (n, 1))
+    cfg = {"fold": fold, "git_sha": "s", "t": 1024, "middle_share": 0.2, "model": "m", "epochs": 2}
+    return fold, oof_frame(ids, p, p, [True] * n, [False] * n), cfg | log
+
+
+def test_validate_fold_parts_happy_path():
+    out = validate_fold_parts([_part(k) for k in (3, 0, 1, 2, 4)], _fold_manifest())
+    assert out["id"].tolist() == list(range(10))
+
+
+def test_validate_fold_parts_rejections():
+    m = _fold_manifest()
+    ok = [_part(k) for k in range(5)]
+    wrong = [_part(0, ids=[1, 6])] + ok[1:]  # fold 1's ids in fold 0's file
+    with pytest.raises(ValueError, match="differ from the manifest"):
+        validate_fold_parts(wrong, m)
+    with pytest.raises(ValueError, match="missing fold"):
+        validate_fold_parts(ok[:4], m)
+    with pytest.raises(ValueError, match="more than once"):
+        validate_fold_parts([*ok, _part(2)], m)
+    with pytest.raises(ValueError, match="middle_share"):
+        validate_fold_parts([*ok[:4], _part(4, middle_share=0.0)], m)
+    with pytest.raises(ValueError, match="git_sha"):
+        validate_fold_parts([*ok[:4], _part(4, git_sha="x")], m)
+    with pytest.raises(ValueError, match="error"):
+        validate_fold_parts([*ok[:4], _part(4, error="OOM")], m)

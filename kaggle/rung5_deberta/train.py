@@ -471,6 +471,7 @@ def run_fold(args, fold: int) -> int:
     seed = 1000 + fold
     log = {"fold": fold, "seed": seed, "tag": args.tag, "git_sha": args.git_sha}
     log |= {"t": args.t, "middle_share": args.middle_share, "epochs": args.epochs}
+    log["micro_batch"] = args.micro_batch
     log["model"] = "tiny-from-scratch" if args.tiny else args.model
     try:
         enc, tok, manifest = load_or_encode(args)
@@ -495,6 +496,11 @@ def run_fold(args, fold: int) -> int:
         log |= {"epochs_log": history, "best_epoch": best["epoch"], "train_stats": stats}
         if best["state"] is not None:
             model.load_state_dict(best["state"])
+        elif args.max_rows:
+            log["inner_holdout_empty_dry_run"] = True
+            print(f"[fold {fold}] empty inner holdout; using last epoch (--max-rows dry run)")
+        else:
+            raise RuntimeError("inner holdout is empty: no best epoch to select")
         t1 = time.time()
         ab, ba = predict_both(model, enc, pr, tok, args, device)
         log["predict_seconds"] = time.time() - t1
@@ -502,11 +508,11 @@ def run_fold(args, fold: int) -> int:
         sub = meta.iloc[pr]
         frame = oof_frame(sub["id"], ab, ba, sub["both_untruncated"], sub["hard_cut"])
         assert_no_text(frame)
-        frame.to_parquet(out / f"oof_fold{fold}.parquet", index=False)
-        log["oof_rows"] = len(frame)
         log["fold_log_loss_swap_avg"] = log_loss(
             sub["y"].to_numpy(), frame[["p_a", "p_b", "p_tie"]].to_numpy()
         )
+        log["oof_rows"] = len(frame)
+        frame.to_parquet(out / f"oof_fold{fold}.parquet", index=False)  # only after a clean score
         code = 0
     except Exception as e:  # noqa: BLE001  recorded, never skipped; the fold produces no OOF file
         log["error"] = f"{type(e).__name__}: {e}"
