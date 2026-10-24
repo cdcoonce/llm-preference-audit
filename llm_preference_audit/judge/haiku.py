@@ -97,7 +97,7 @@ def _parse_text(text: str) -> tuple[float, float, float, str] | None:
     if not all(math.isfinite(p) and p >= 0 for p in ps):
         return None
     total = float(sum(ps))
-    if not total > 0:
+    if not (math.isfinite(total) and total > 0):  # 1e308 + 1e308 overflows to inf
         return None
     return ps[0] / total, ps[1] / total, ps[2] / total, winner
 

@@ -97,6 +97,8 @@ def test_parse_rejects_nonfinite_and_zero_sum():
     assert parse_result(raw('{"winner":"A","p_a":0,"p_b":0,"p_tie":0}')).status == "parse_failed"
     assert parse_result(raw('{"winner":"A","p_a":NaN,"p_b":1,"p_tie":0}')).status == "parse_failed"
     assert parse_result(raw('{"winner":"A","p_a":1,"p_b":0}')).status == "parse_failed"
+    overflow = '{"winner":"A","p_a":1e308,"p_b":1e308,"p_tie":0}'
+    assert parse_result(raw(overflow)).status == "parse_failed"
 
 
 ITEM = JudgeItem("r1-ab", "PROMPT_TXT", "FIRST_RESP", "SECOND_RESP")
