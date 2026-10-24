@@ -204,6 +204,13 @@ def build_model(args, tok):
         model = AutoModelForSequenceClassification.from_config(cfg)
     else:
         model = AutoModelForSequenceClassification.from_pretrained(args.model, num_labels=3)
+    # transformers 5 keeps the checkpoint's dtype, and deberta-v3-base ships in fp16. Mixed
+    # precision needs fp32 master weights (autocast does the fp16 compute), or GradScaler
+    # refuses to unscale fp16 gradients.
+    model = model.float()
+    bad = {str(p.dtype) for p in model.parameters() if p.dtype != torch.float32}
+    if bad:
+        raise SystemExit(f"model parameters must be float32 before training, found {sorted(bad)}")
     if args.grad_ckpt:
         model.gradient_checkpointing_enable()
     return model
