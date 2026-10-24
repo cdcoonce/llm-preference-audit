@@ -1,0 +1,202 @@
+{
+  "run": "pilot-500",
+  "n_rows": 500,
+  "n_calls": 1000,
+  "status_counts": {
+    "ok": 1000
+  },
+  "refusal_rate": 0.0,
+  "fallback_row_share": 0.0,
+  "winner_matches_argmax_share": 0.936,
+  "log_loss": {
+    "prior_oof": 1.09650156522038,
+    "raw_swap_avg": 1.3414239993255528,
+    "temperature_cv": 1.0583560067205988,
+    "matrix_cv": 1.0049006331358676,
+    "matrix_cv_excluding_fallback_rows": 1.0049006331358676,
+    "ab_only_raw": 1.6152752961516397
+  },
+  "gain_vs_prior": {
+    "diff": 0.09160093208451238,
+    "lo": 0.049007121272183214,
+    "hi": 0.1298348483705464
+  },
+  "gate_pass": true,
+  "position": {
+    "swap_flip": {
+      "n": 500,
+      "flip_rate": 0.15,
+      "mean_abs_diff": 0.10978000000000002
+    },
+    "first_position": {
+      "n_calls": 1000,
+      "mean_p_first": 0.47354999999999997,
+      "mean_p_second": 0.4503,
+      "diff": 0.02325,
+      "ci95": [
+        0.010958999999999998,
+        0.03609868930131784
+      ],
+      "share_first_wins_argmax_nontie": 0.5105527638190954
+    }
+  },
+  "verbosity_calibrated": {
+    "n": 345,
+    "human_share": 0.6202898550724638,
+    "model_share": 0.5693737950498987,
+    "diff": -0.05091606002256503,
+    "ci95": [
+      -0.0957833875378397,
+      -0.004052965587675704
+    ],
+    "buckets": [
+      {
+        "lo": 0.0020811662038244805,
+        "hi": 0.15048326955558514,
+        "n": 69,
+        "human_share": 0.5072463768115942,
+        "model_share": 0.4841747886499272
+      },
+      {
+        "lo": 0.15048326955558514,
+        "hi": 0.30700722627026555,
+        "n": 69,
+        "human_share": 0.6956521739130435,
+        "model_share": 0.5627211848330372
+      },
+      {
+        "lo": 0.30700722627026555,
+        "hi": 0.6384899069180132,
+        "n": 69,
+        "human_share": 0.6666666666666666,
+        "model_share": 0.544832084810307
+      },
+      {
+        "lo": 0.6384899069180132,
+        "hi": 1.1067094989007291,
+        "n": 68,
+        "human_share": 0.6470588235294118,
+        "model_share": 0.5986499327990877
+      },
+      {
+        "lo": 1.1067094989007291,
+        "hi": 4.07753744390572,
+        "n": 70,
+        "human_share": 0.5857142857142857,
+        "model_share": 0.6556646834234485
+      }
+    ]
+  },
+  "verbosity_raw_swap_avg": {
+    "n": 345,
+    "human_share": 0.6202898550724638,
+    "model_share": 0.5692044691436523,
+    "diff": -0.051085385928811435,
+    "ci95": [
+      -0.09544560539581987,
+      -0.004543249445170132
+    ],
+    "buckets": [
+      {
+        "lo": 0.0020811662038244805,
+        "hi": 0.15048326955558514,
+        "n": 69,
+        "human_share": 0.5072463768115942,
+        "model_share": 0.4895701466852419
+      },
+      {
+        "lo": 0.15048326955558514,
+        "hi": 0.30700722627026555,
+        "n": 69,
+        "human_share": 0.6956521739130435,
+        "model_share": 0.5591373118258456
+      },
+      {
+        "lo": 0.30700722627026555,
+        "hi": 0.6384899069180132,
+        "n": 69,
+        "human_share": 0.6666666666666666,
+        "model_share": 0.5460566527595457
+      },
+      {
+        "lo": 0.6384899069180132,
+        "hi": 1.1067094989007291,
+        "n": 68,
+        "human_share": 0.6470588235294118,
+        "model_share": 0.5980782003113636
+      },
+      {
+        "lo": 1.1067094989007291,
+        "hi": 4.07753744390572,
+        "n": 70,
+        "human_share": 0.5857142857142857,
+        "model_share": 0.6523928650816236
+      }
+    ]
+  },
+  "tokens": {
+    "input": 1493530,
+    "output": 70080
+  },
+  "cost_usd": 0.0921965,
+  "config": {
+    "model": "claude-haiku-5-5",
+    "effort": "low",
+    "max_tokens": 2048,
+    "system_sha256": "02d5ecb9296413e1b7eb30499c3e0fa54f23921f0fc872bac8a370e6c359452c",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "winner": {
+          "type": "string",
+          "enum": [
+            "A",
+            "B",
+            "tie"
+          ]
+        },
+        "p_a": {
+          "type": "number"
+        },
+        "p_b": {
+          "type": "number"
+        },
+        "p_tie": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "winner",
+        "p_a",
+        "p_b",
+        "p_tie"
+      ],
+      "additionalProperties": false
+    },
+    "prompt_budget_tokens": 1000,
+    "response_budget_tokens": 1500,
+    "n_pilot": 500,
+    "sample_salt": "haiku-pilot-2026-10-23",
+    "orders": [
+      "ab",
+      "ba"
+    ],
+    "calibration": "matrix scaling (multinomial LR on log p), cross-fitted by fold"
+  },
+  "truncation": {
+    "prompt_truncated_share": 0.006,
+    "response_truncated_share": 0.008,
+    "rows_any_truncated_share": 0.016,
+    "words_omitted_share": 0.02985536040362238
+  },
+  "batch_id": "msgbatch_01MsF2dsd3pvLEtkifXCSX5V",
+  "lgbm_reference": {
+    "run_id": "20261024T002700-full",
+    "log_loss": 1.0386847349178152,
+    "judge_gain_vs_lgbm": {
+      "diff": 0.03378410178194756,
+      "lo": -0.014266582987496203,
+      "hi": 0.07781059395097242
+    }
+  }
+}
