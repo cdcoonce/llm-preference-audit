@@ -1,0 +1,254 @@
+{
+  "rows": 57477,
+  "integrity": {
+    "parse_failures": {
+      "prompt": 0,
+      "response_a": 0,
+      "response_b": 0
+    },
+    "rows_with_null_turns": {
+      "prompt": 0,
+      "response_a": 111,
+      "response_b": 120
+    },
+    "null_turns_total": {
+      "prompt": 0,
+      "response_a": 120,
+      "response_b": 126
+    },
+    "onehot_violations": 0
+  },
+  "hf_vs_kaggle": {
+    "rows_hf": 57477,
+    "rows_other": 57477,
+    "id_sets_equal": true,
+    "shared_ids": 57477,
+    "label_mismatch_rows": 0,
+    "text_mismatch_rows": 0,
+    "file_sha256_hf": "0692154aaf20fc6649090c3f49b6b5dd1e693a765ecb5f0856ae0da5946f5be2",
+    "file_sha256_kaggle": "0692154aaf20fc6649090c3f49b6b5dd1e693a765ecb5f0856ae0da5946f5be2",
+    "files_byte_identical": true
+  },
+  "labels": {
+    "counts": {
+      "a": 20064,
+      "b": 19652,
+      "tie": 17761
+    },
+    "shares": {
+      "a": 0.34907876193955845,
+      "b": 0.341910677314404,
+      "tie": 0.30901056074603755
+    },
+    "class_prior_log_loss": 1.0972269065468327,
+    "position": {
+      "n_nonties": 39716,
+      "p_a_among_nonties": 0.5051868264679222,
+      "p_b_among_nonties": 0.49481317353207777,
+      "p_a_ci95": [
+        0.500269339001533,
+        0.5101033106215208
+      ]
+    }
+  },
+  "turns": {
+    "multi_turn_share": 0.13116550968213372,
+    "turn_count_distribution": {
+      "1": 49938,
+      "2": 4673,
+      "3": 1485,
+      "4": 607,
+      "5": 311,
+      "6": 167,
+      "7": 103,
+      "8": 60,
+      "9": 44,
+      "10": 29,
+      "11": 16,
+      "12": 14,
+      "13": 5,
+      "14": 3,
+      "15": 4,
+      "16": 2,
+      "17": 3,
+      "18": 1,
+      "19": 4,
+      "20": 2,
+      "21": 1,
+      "22": 1,
+      "29": 1,
+      "32": 1,
+      "35": 1,
+      "36": 1
+    }
+  },
+  "length": {
+    "words": {
+      "prompt": {
+        "p50": 16.0,
+        "p90": 123.0,
+        "p99": 666.0,
+        "max": 4809.0
+      },
+      "response_a": {
+        "p50": 169.0,
+        "p90": 421.0,
+        "p99": 1034.0,
+        "max": 9184.0
+      },
+      "response_b": {
+        "p50": 171.0,
+        "p90": 419.0,
+        "p99": 1048.239999999998,
+        "max": 8173.0
+      }
+    },
+    "est_tokens": {
+      "total": 36825230.190000005,
+      "per_row_mean": 640.695063938619,
+      "per_row": {
+        "p50": 513.38,
+        "p90": 1202.3200000000002,
+        "p99": 3099.857599999992,
+        "max": 16724.75
+      },
+      "tokens_per_word_assumed": 1.33
+    },
+    "share_over_est_tokens": {
+      "4000": 0.004714929450040886,
+      "8000": 0.00038276180037232285,
+      "16000": 1.7398263653287403e-05
+    }
+  },
+  "verbosity_longer_wins": {
+    "n": 39273,
+    "longer_won": 24104,
+    "share": 0.6137549970717796,
+    "ci95": [
+      0.608928631208148,
+      0.618559110576059
+    ]
+  },
+  "models": {
+    "n_distinct": 64,
+    "top10": [
+      {
+        "model": "gpt-4-1106-preview",
+        "appearances": 7387
+      },
+      {
+        "model": "gpt-3.5-turbo-0613",
+        "appearances": 7083
+      },
+      {
+        "model": "gpt-4-0613",
+        "appearances": 6165
+      },
+      {
+        "model": "claude-2.1",
+        "appearances": 5583
+      },
+      {
+        "model": "claude-instant-1",
+        "appearances": 4136
+      },
+      {
+        "model": "gpt-4-0314",
+        "appearances": 4122
+      },
+      {
+        "model": "claude-1",
+        "appearances": 3978
+      },
+      {
+        "model": "vicuna-33b",
+        "appearances": 3720
+      },
+      {
+        "model": "mixtral-8x7b-instruct-v0.1",
+        "appearances": 3545
+      },
+      {
+        "model": "vicuna-13b",
+        "appearances": 3448
+      }
+    ]
+  },
+  "duplicates": {
+    "exact_duplicate_rows": 7,
+    "distinct_prompt_groups": 51213,
+    "rows_in_groups_ge2": 9550,
+    "groups_ge2": 3286,
+    "repeat_same_model_pair": {
+      "all_rows": {
+        "n_groups": 208,
+        "n_pairs": 344,
+        "agree_share": 0.7238372093023255,
+        "groups_all_agree_share": 0.6875
+      },
+      "exact_duplicates_removed": {
+        "n_groups": 204,
+        "n_pairs": 333,
+        "agree_share": 0.7147147147147147,
+        "groups_all_agree_share": 0.6813725490196079
+      }
+    },
+    "noise_ceiling": "n=333 label pairs from 204 repeated prompt/model-pair cells (exact duplicates removed). Enough for a rough overall agreement rate only: pairs within a cell are not independent (effective n is nearer the cell count), repeated prompts skew short and generic, and it is too small for per-model or per-length strata."
+  },
+  "splits": {
+    "fold0": {
+      "rows": 10136,
+      "groups": 9157,
+      "label_shares": {
+        "a": 0.35043409629044986,
+        "b": 0.34717837411207575,
+        "tie": 0.30238752959747434
+      }
+    },
+    "fold1": {
+      "rows": 10311,
+      "groups": 9214,
+      "label_shares": {
+        "a": 0.3440015517408593,
+        "b": 0.3438075841334497,
+        "tie": 0.312190864125691
+      }
+    },
+    "fold2": {
+      "rows": 10495,
+      "groups": 9332,
+      "label_shares": {
+        "a": 0.3485469271081467,
+        "b": 0.33920914721295853,
+        "tie": 0.3122439256788947
+      }
+    },
+    "fold3": {
+      "rows": 10276,
+      "groups": 9198,
+      "label_shares": {
+        "a": 0.3547100038925652,
+        "b": 0.3455624756714675,
+        "tie": 0.2997275204359673
+      }
+    },
+    "fold4": {
+      "rows": 10630,
+      "groups": 9256,
+      "label_shares": {
+        "a": 0.34901222953904043,
+        "b": 0.33358419567262465,
+        "tie": 0.3174035747883349
+      }
+    },
+    "test": {
+      "rows": 5629,
+      "groups": 5056,
+      "label_shares": {
+        "a": 0.3467756262213537,
+        "b": 0.3430449458163084,
+        "tie": 0.3101794279623379
+      }
+    }
+  }
+}
