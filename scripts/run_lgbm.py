@@ -106,7 +106,8 @@ def main(argv: list[str]) -> None:
         "n_rows": len(y),
         "configs": {},
     }
-    losses: dict[str, np.ndarray] = {}
+    if SUMMARY.exists():
+        out["configs"] = json.loads(SUMMARY.read_text())["configs"]
     words_a = X_cv["n_words_a"].to_numpy()
     words_b = X_cv["n_words_b"].to_numpy()
     ident = np.all(
