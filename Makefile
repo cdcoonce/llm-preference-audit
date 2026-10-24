@@ -35,4 +35,4 @@ profile:
 	uv run python scripts/make_profile.py
 
 lgbm:
-	uv run python scripts/run_lgbm.py
+	uv run python scripts/run_lgbm.py $(CONFIGS)

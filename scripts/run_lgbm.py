@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,7 +61,11 @@ def oof_prior(y: np.ndarray, folds: np.ndarray) -> np.ndarray:
     return P
 
 
-def main() -> None:
+def main(argv: list[str]) -> None:
+    names = argv or list(CONFIGS)
+    unknown = set(names) - set(CONFIGS)
+    if unknown:
+        raise SystemExit(f"unknown configs {sorted(unknown)}; choose from {list(CONFIGS)}")
     dirty = git("status", "--porcelain", "--", "llm_preference_audit", "scripts", "pyproject.toml")
     if dirty:
         raise SystemExit(f"uncommitted code; commit before running:\n{dirty}")
@@ -72,7 +77,12 @@ def main() -> None:
     print(f"manifest ok ({MANIFEST_PATH} digest matches)")
 
     t0 = time.time()
-    X_all = build_features(df)
+    cache = Path("data/features.parquet")  # gitignored with the rest of data/
+    if cache.exists() and len(pd.read_parquet(cache)) == len(df):
+        X_all = pd.read_parquet(cache)
+    else:
+        X_all = build_features(df)
+        X_all.to_parquet(cache)
     print(f"features: {X_all.shape} in {time.time() - t0:.0f}s")
     m = manifest.set_index("id").loc[X_all.index]
     cv = (m["split"] == "cv").to_numpy()
@@ -102,7 +112,8 @@ def main() -> None:
     ident = np.all(
         [X_cv[f"{k}_a"].to_numpy() == X_cv[f"{k}_b"].to_numpy() for k in RESPONSE_FEATURES], axis=0
     )
-    for name, cfg in CONFIGS.items():
+    for name in names:
+        cfg = CONFIGS[name]
         cols = feature_columns(cfg["features"])
         X = X_cv[cols]
         t1 = time.time()
@@ -110,7 +121,6 @@ def main() -> None:
         secs = time.time() - t1
         P = res["oof"]
         loss = row_losses(y, P)
-        losses[name] = loss
         fs = fold_scores(y, P, folds)
         ci_prior = group_bootstrap_diff(prior_loss, loss, groups)
         cal = calibration_table(y, P)
@@ -175,19 +185,26 @@ def main() -> None:
             f" vs prior {ci_prior['diff']:+.4f} [{ci_prior['lo']:+.4f},{ci_prior['hi']:+.4f}]"
             f" ece {cal['ece']:.4f} iters {row['best_iterations']} {secs:.0f}s"
         )
-    for a, b in (("length_only", "full"), ("full_no_swap", "full")):
-        out.setdefault("paired", {})[f"{a}_vs_{b}"] = group_bootstrap_diff(
-            losses[a], losses[b], groups
-        )
-    full = out["configs"]["full"]
-    ci = full["improvement_vs_prior"]
-    out["gate"] = {
-        "threshold": PRIOR_LOG_LOSS,
-        "pass": bool(full["log_loss"] < PRIOR_LOG_LOSS and ci["lo"] > 0),
-    }
+    if set(out["configs"]) == set(CONFIGS):
+        losses = {}
+        for name, c in out["configs"].items():
+            pr = (
+                pd.read_parquet(PRED_DIR / f"{c['run_id']}.parquet").set_index("id").loc[X_cv.index]
+            )
+            losses[name] = row_losses(y, pr[["p_a", "p_b", "p_tie"]].to_numpy())
+        out["paired"] = {
+            f"{a}_vs_{b}": group_bootstrap_diff(losses[a], losses[b], groups)
+            for a, b in (("length_only", "full"), ("full_no_swap", "full"))
+        }
+        full = out["configs"]["full"]
+        ci = full["improvement_vs_prior"]
+        out["gate"] = {
+            "threshold": PRIOR_LOG_LOSS,
+            "pass": bool(full["log_loss"] < PRIOR_LOG_LOSS and ci["lo"] > 0),
+        }
+        print(json.dumps({"gate": out["gate"], "paired": out["paired"]}, indent=2))
     SUMMARY.write_text(json.dumps(out, indent=2) + "\n")
-    print(json.dumps({"gate": out["gate"], "paired": out["paired"]}, indent=2))
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
