@@ -32,6 +32,18 @@ into `data/raw/`. It is never committed: `data/` is gitignored, and `make leak-c
 to fail on any tracked data path, oversized data file, or file carrying the prompt/response text
 columns. Committed predictions hold only `id` and three probabilities.
 
+## Data profile
+
+`make profile` writes aggregate-only statistics (no prompt or response text) to
+`results/profile.json` and [`docs/data-profile.md`](docs/data-profile.md). Related targets:
+
+- `make data-kaggle` downloads the Kaggle copy into `data/kaggle/` (needs the kaggle CLI and
+  accepted competition rules) so `make profile` can compare it with the Hugging Face copy.
+- `make split` regenerates the grouped split manifest. The full manifest
+  (`splits/split_manifest.csv`, ~1.9 MB) is gitignored because it exceeds the leak-check size
+  limit; `splits/split_manifest.sha256` and `splits/split_counts.json` are committed and a test
+  checks the regenerated manifest against the digest when `data/raw` is present.
+
 ## Quickstart
 
 ```
