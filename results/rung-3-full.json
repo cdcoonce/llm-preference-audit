@@ -1,0 +1,218 @@
+{
+  "run": "full-cv",
+  "n_rows": 51848,
+  "n_calls": 103696,
+  "status_counts": {
+    "ok": 103601,
+    "refused": 88,
+    "parse_failed": 7
+  },
+  "refusal_rate": 0.0008486344699891992,
+  "fallback_row_share": 0.001080080234531708,
+  "winner_matches_argmax_share": 0.9411106070404726,
+  "log_loss": {
+    "prior_oof": 1.0972787689455352,
+    "raw_swap_avg": 1.3153663925168584,
+    "temperature_cv": 1.0529930881098275,
+    "matrix_cv": 0.9762065779772934,
+    "matrix_cv_excluding_fallback_rows": 0.9760582143749612,
+    "ab_only_raw": 1.4314720745571896
+  },
+  "gain_vs_prior": {
+    "diff": 0.12107219096824189,
+    "lo": 0.11687058862241732,
+    "hi": 0.1249189823472869
+  },
+  "gate_pass": true,
+  "position": {
+    "swap_flip": {
+      "n": 51792,
+      "flip_rate": 0.18597466790237874,
+      "mean_abs_diff": 0.1176851298158643
+    },
+    "first_position": {
+      "n_calls": 103601,
+      "mean_p_first": 0.4751438503398033,
+      "mean_p_second": 0.44611009508543387,
+      "diff": 0.029033755254369537,
+      "ci95": [
+        0.02753195239730836,
+        0.030536611412665903
+      ],
+      "share_first_wins_argmax_nontie": 0.5210981337949411
+    }
+  },
+  "verbosity_calibrated": {
+    "n": 35436,
+    "human_share": 0.6135003950784513,
+    "model_share": 0.5787002595891476,
+    "diff": -0.0348001354893037,
+    "ci95": [
+      -0.03929498391703432,
+      -0.03054182757302685
+    ],
+    "buckets": [
+      {
+        "lo": 0.0012523483164654792,
+        "hi": 0.17185025692665912,
+        "n": 7083,
+        "human_share": 0.5218127911901737,
+        "model_share": 0.511846494336425
+      },
+      {
+        "lo": 0.17185025692665912,
+        "hi": 0.37668614355812124,
+        "n": 7091,
+        "human_share": 0.574249048089127,
+        "model_share": 0.5444652823994816
+      },
+      {
+        "lo": 0.37668614355812124,
+        "hi": 0.6486954179891111,
+        "n": 7088,
+        "human_share": 0.6255643340857788,
+        "model_share": 0.5693598403715153
+      },
+      {
+        "lo": 0.6486954179891111,
+        "hi": 1.1700712526502546,
+        "n": 7084,
+        "human_share": 0.6599378881987578,
+        "model_share": 0.6050715382210241
+      },
+      {
+        "lo": 1.1700712526502546,
+        "hi": 6.421622267806518,
+        "n": 7090,
+        "human_share": 0.6858956276445698,
+        "model_share": 0.6627166483230433
+      }
+    ]
+  },
+  "verbosity_raw_swap_avg": {
+    "n": 35436,
+    "human_share": 0.6135003950784513,
+    "model_share": 0.5742741348367881,
+    "diff": -0.03922626024166311,
+    "ci95": [
+      -0.04362888283847677,
+      -0.03496787493300047
+    ],
+    "buckets": [
+      {
+        "lo": 0.0012523483164654792,
+        "hi": 0.17185025692665912,
+        "n": 7083,
+        "human_share": 0.5218127911901737,
+        "model_share": 0.5109810132845923
+      },
+      {
+        "lo": 0.17185025692665912,
+        "hi": 0.37668614355812124,
+        "n": 7091,
+        "human_share": 0.574249048089127,
+        "model_share": 0.5416478785834484
+      },
+      {
+        "lo": 0.37668614355812124,
+        "hi": 0.6486954179891111,
+        "n": 7088,
+        "human_share": 0.6255643340857788,
+        "model_share": 0.5650172259257851
+      },
+      {
+        "lo": 0.6486954179891111,
+        "hi": 1.1700712526502546,
+        "n": 7084,
+        "human_share": 0.6599378881987578,
+        "model_share": 0.5988210971682383
+      },
+      {
+        "lo": 1.1700712526502546,
+        "hi": 6.421622267806518,
+        "n": 7090,
+        "human_share": 0.6858956276445698,
+        "model_share": 0.6548637331797829
+      }
+    ]
+  },
+  "tokens": {
+    "input": 154818646,
+    "output": 7531328
+  },
+  "cost_usd": 9.623764300000001,
+  "config": {
+    "model": "claude-haiku-5-5",
+    "effort": "low",
+    "max_tokens": 2048,
+    "system_sha256": "02d5ecb9296413e1b7eb30499c3e0fa54f23921f0fc872bac8a370e6c359452c",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "winner": {
+          "type": "string",
+          "enum": [
+            "A",
+            "B",
+            "tie"
+          ]
+        },
+        "p_a": {
+          "type": "number"
+        },
+        "p_b": {
+          "type": "number"
+        },
+        "p_tie": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "winner",
+        "p_a",
+        "p_b",
+        "p_tie"
+      ],
+      "additionalProperties": false
+    },
+    "prompt_budget_tokens": 1000,
+    "response_budget_tokens": 1500,
+    "run": "full-cv",
+    "n_rows": null,
+    "sample_salt": "haiku-pilot-2026-10-23",
+    "orders": [
+      "ab",
+      "ba"
+    ],
+    "calibration": "matrix scaling (multinomial LR on log p), cross-fitted by fold"
+  },
+  "truncation": {
+    "prompt_truncated_share": 0.00835133467057553,
+    "response_truncated_share": 0.008052383891374788,
+    "rows_any_truncated_share": 0.0191328498688474,
+    "words_omitted_share": 0.03343987772371673
+  },
+  "batch_ids": [
+    "msgbatch_012FYbXgPinqpRBUqB6A1jTu",
+    "msgbatch_0154467YAvhdeujJzy7hWfsX",
+    "msgbatch_017kNMXJRY1cEjSEMyz9BQmZ",
+    "msgbatch_01ASRRkB1uVQBPTvCqvu6BeH",
+    "msgbatch_01HNwsQheSRroDe7Vk5ZtcWf",
+    "msgbatch_01JjeETwyEgCUCucBwCEeuNi",
+    "msgbatch_01LL3NQCSiPjdCvEinjjenJJ",
+    "msgbatch_01R4SSCmNycCd3DQAxPCe7Ts",
+    "msgbatch_01WB2hnKvrgNZCdVTeJXg4j3",
+    "msgbatch_01XopyTfsciwHkYaUATz3FLJ",
+    "msgbatch_01YZfoSAjvWHYuUdnCtfai9z"
+  ],
+  "n_chunks": 11,
+  "lgbm_reference": {
+    "run_id": "20261024T002700-full",
+    "log_loss": 1.0365839805296162,
+    "judge_gain_vs_lgbm": {
+      "diff": 0.06037740255232286,
+      "lo": 0.05564413061052339,
+      "hi": 0.06480438269329707
+    }
+  }
+}

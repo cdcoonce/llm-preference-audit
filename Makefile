@@ -1,4 +1,4 @@
-.PHONY: setup lint format test leak-check ci data data-kaggle split profile lgbm
+.PHONY: setup lint format test leak-check ci data data-kaggle split profile lgbm judge-pilot judge-full
 
 setup:
 	uv sync --group dev
@@ -36,3 +36,9 @@ profile:
 
 lgbm:
 	uv run python scripts/run_lgbm.py $(CONFIGS)
+
+judge-pilot:
+	uv run python scripts/run_haiku_pilot.py $(STAGE)
+
+judge-full:
+	uv run python scripts/run_haiku_pilot.py $(STAGE) --run full-cv
