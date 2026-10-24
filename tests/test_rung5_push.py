@@ -22,6 +22,8 @@ def _args(tmp_path, **kw):
         t=1024,
         epochs=2,
         micro_batch=4,
+        lr=2e-5,
+        precision="fp16",
         grad_ckpt=False,
         tag="t1",
         repo="o/r",
@@ -95,3 +97,11 @@ def test_ablation_args_render(tmp_path, monkeypatch):
     a.folds, a.middle_share, a.tag = "0", 0.0, "abl0"
     code = (push.render(a, "abc123") / "rung5_folds.py").read_text()
     assert "'--middle-share', '0.0'" in code and "'--folds', '0'" in code
+
+
+def test_debug_lr_and_precision_reach_the_kernel(tmp_path, monkeypatch):
+    monkeypatch.setattr(push, "REPO_ROOT", tmp_path)
+    a, _ = _args(tmp_path)
+    a.folds, a.lr, a.precision, a.tag = "0", 3e-5, "fp32", "dbg-lr3e5-fp32"
+    code = (push.render(a, "abc123") / "rung5_folds.py").read_text()
+    assert "'--lr', '3e-05'" in code and "'--precision', 'fp32'" in code

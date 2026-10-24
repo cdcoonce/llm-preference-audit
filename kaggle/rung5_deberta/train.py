@@ -234,8 +234,9 @@ def collate(seqs: list[list[int]], pad_id: int, device):
     return ids.to(device), mask.to(device)
 
 
-def autocast(device):
-    return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=device.type == "cuda")
+def autocast(device, args):
+    on = device.type == "cuda" and args.precision == "fp16"
+    return torch.autocast(device_type="cuda", dtype=torch.float16, enabled=on)
 
 
 @torch.no_grad()
@@ -248,7 +249,7 @@ def predict(model, enc: Encoded, idx, swap: bool, tok, args, device) -> np.ndarr
     for s in range(0, len(order), args.infer_batch):
         sel = order[s : s + args.infer_batch]
         ids, mask = collate([seqs[j] for j in sel], tok.pad_token_id, device)
-        with autocast(device):
+        with autocast(device, args):
             logits = model(input_ids=ids, attention_mask=mask).logits
         out[sel] = torch.softmax(logits.float(), dim=-1).cpu().numpy()
     return out
@@ -302,10 +303,10 @@ def train_epochs(model, enc, train_idx, eval_idx, tok, args, seed, device, epoch
             "weight_decay": 0.0,
         },
     ]
-    opt = torch.optim.AdamW(params, lr=LR)
+    opt = torch.optim.AdamW(params, lr=args.lr)
     sched = get_linear_schedule_with_warmup(opt, int(WARMUP * total_steps), total_steps)
     use_cuda = device.type == "cuda"
-    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
+    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda and args.precision == "fp16")
     if use_cuda:
         torch.cuda.reset_peak_memory_stats()
 
@@ -327,7 +328,7 @@ def train_epochs(model, enc, train_idx, eval_idx, tok, args, seed, device, epoch
                 ]
                 ids, mask = collate([s for s, _ in pairs], tok.pad_token_id, device)
                 y = torch.tensor([y for _, y in pairs], device=device)
-                with autocast(device):
+                with autocast(device, args):
                     logits = model(input_ids=ids, attention_mask=mask).logits
                 loss = torch.nn.functional.cross_entropy(logits.float(), y)
                 if not torch.isfinite(loss):
@@ -435,6 +436,7 @@ def run_probe(args) -> None:
 
     model = build_model(args, tok).to(device)
     probe = {"mode": "probe", "t": args.t, "middle_share": args.middle_share, "tiny": args.tiny}
+    probe |= {"lr": args.lr, "precision": args.precision}
     probe |= versions(device) | enc.shares | {"git_sha": args.git_sha}
     probe["model"] = "tiny-from-scratch" if args.tiny else args.model
     try:
@@ -498,6 +500,7 @@ def run_fold(args, fold: int) -> int:
     log = {"fold": fold, "seed": seed, "tag": args.tag, "git_sha": args.git_sha}
     log |= {"t": args.t, "middle_share": args.middle_share, "epochs": args.epochs}
     log["micro_batch"] = args.micro_batch
+    log |= {"lr": args.lr, "precision": args.precision}
     log["model"] = "tiny-from-scratch" if args.tiny else args.model
     try:
         enc, tok, manifest = load_or_encode(args)
@@ -581,8 +584,25 @@ def worker_argv(args, fold: int, cache: Path) -> list[str]:
         args.tag,
         "--git-sha",
         args.git_sha,
+        "--lr",
+        str(args.lr),
+        "--precision",
+        args.precision,
     ]
     return a + (["--tiny"] if args.tiny else []) + (["--grad-ckpt"] if args.grad_ckpt else [])
+
+
+WORKER_CONFIG = ("t", "middle_share", "epochs", "micro_batch", "lr", "precision", "git_sha")
+
+
+def check_worker_config(args, fold: int) -> None:
+    """The fold's log must record the parent's config: a flag the worker argv dropped would
+    otherwise train a silently different run (it happened with --lr and --precision)."""
+    log = json.loads((Path(args.out_dir) / f"log_fold{fold}.json").read_text())
+    want = {k: getattr(args, k) for k in WORKER_CONFIG}
+    got = {k: log.get(k) for k in WORKER_CONFIG}
+    if got != want:
+        raise SystemExit(f"fold {fold} ran with {got}, parent asked for {want}")
 
 
 def run_folds(args) -> int:
@@ -607,7 +627,10 @@ def run_folds(args) -> int:
                 env["CUDA_VISIBLE_DEVICES"] = str(slot)
             print(f"fold {fold} -> slot {slot}", flush=True)
             cmd = [sys.executable, str(Path(__file__).resolve()), *worker_argv(args, fold, cache)]
-            return subprocess.run(cmd, check=False, env=env).returncode
+            code = subprocess.run(cmd, check=False, env=env).returncode
+            if code == 0:
+                check_worker_config(args, fold)
+            return code
         finally:
             slots.put(slot)
 
@@ -632,6 +655,8 @@ def parse(argv=None) -> argparse.Namespace:
     ap.add_argument("--probe-steps", type=int, default=200)
     ap.add_argument("--probe-infer-rows", type=int, default=2000)
     ap.add_argument("--micro-batch", type=int, default=4)
+    ap.add_argument("--lr", type=float, default=LR)
+    ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
     ap.add_argument("--infer-batch", type=int, default=16)
     ap.add_argument("--grad-ckpt", action="store_true")
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR)

@@ -73,6 +73,7 @@ def preflight(sha: str | None) -> str:
 def train_args(a: argparse.Namespace, sha: str) -> list[str]:
     out = ["--mode", a.mode, "--folds", a.folds, "--middle-share", str(a.middle_share)]
     out += ["--t", str(a.t), "--epochs", str(a.epochs), "--micro-batch", str(a.micro_batch)]
+    out += ["--lr", str(a.lr), "--precision", a.precision]
     out += ["--tag", a.tag, "--git-sha", sha]
     return out + (["--grad-ckpt"] if a.grad_ckpt else [])
 
@@ -136,6 +137,8 @@ def main(argv=None) -> int:
     ap.add_argument("--t", type=int, default=1024)
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--micro-batch", type=int, default=4)
+    ap.add_argument("--lr", type=float, default=2e-5)
+    ap.add_argument("--precision", choices=["fp16", "fp32"], default="fp16")
     ap.add_argument("--grad-ckpt", action="store_true")
     ap.add_argument("--tag", required=True)
     ap.add_argument("--sha", help="commit to pin (must be HEAD); default HEAD")
