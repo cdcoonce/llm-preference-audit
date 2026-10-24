@@ -114,6 +114,15 @@ def test_swap_twice_is_identity_and_flips_a_b():
     pd.testing.assert_frame_equal(S, build_features(df2))
 
 
+def test_swap_works_on_the_length_only_subset():
+    X = build_features(synth())[list(LENGTH_ONLY)]
+    S = swap_pair(X)
+    assert list(S.columns) == list(X.columns)
+    np.testing.assert_allclose(S["n_words_a"], X["n_words_b"])
+    np.testing.assert_allclose(S["n_words_diff"], -X["n_words_diff"])
+    pd.testing.assert_frame_equal(swap_pair(S), X)
+
+
 def test_swap_label_mapping():
     assert list(swap_labels(np.array([0, 1, 2, 0, 1]))) == [1, 0, 2, 1, 0]
     y = np.array([0, 1, 2, 1])

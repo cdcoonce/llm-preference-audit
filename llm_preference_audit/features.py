@@ -101,12 +101,17 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def swap_pair(X: pd.DataFrame) -> pd.DataFrame:
-    """Swap the roles of a and b: x_a<->x_b, diff and logratio flip sign, absdiff is kept."""
+    """Swap the roles of a and b: x_a<->x_b, diff and logratio flip sign, absdiff is kept.
+
+    Works on any column subset: a column is swapped with its partner when both are present.
+    """
     out = X.copy()
     for k in RESPONSE_FEATURES:
-        out[f"{k}_a"], out[f"{k}_b"] = X[f"{k}_b"], X[f"{k}_a"]
-        out[f"{k}_diff"] = -X[f"{k}_diff"]
-        out[f"{k}_logratio"] = -X[f"{k}_logratio"]
+        if f"{k}_a" in X.columns and f"{k}_b" in X.columns:
+            out[f"{k}_a"], out[f"{k}_b"] = X[f"{k}_b"], X[f"{k}_a"]
+        for s in ("_diff", "_logratio"):
+            if f"{k}{s}" in X.columns:
+                out[f"{k}{s}"] = -X[f"{k}{s}"]
     return out
 
 
