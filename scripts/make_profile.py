@@ -1,5 +1,6 @@
 """Write results/profile.json and docs/data-profile.md (aggregates only, no text)."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -11,6 +12,14 @@ HF = Path("data/raw/train.csv")
 KAGGLE = Path("data/kaggle/train.csv")
 JSON_OUT = Path("results/profile.json")
 MD_OUT = Path("docs/data-profile.md")
+
+
+def file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def pct(x: float) -> str:
@@ -114,7 +123,15 @@ def render(p: dict) -> str:
 
 def main() -> None:
     df = load_train(HF)
-    comparison = compare_copies(df, load_train(KAGGLE)) if KAGGLE.exists() else None
+    comparison = None
+    if KAGGLE.exists():
+        comparison = compare_copies(df, load_train(KAGGLE))
+        hf_sha, kaggle_sha = file_sha256(HF), file_sha256(KAGGLE)
+        comparison |= {
+            "file_sha256_hf": hf_sha,
+            "file_sha256_kaggle": kaggle_sha,
+            "files_byte_identical": hf_sha == kaggle_sha,
+        }
     profile = build_profile(df, build_manifest(df), comparison)
     JSON_OUT.parent.mkdir(exist_ok=True)
     JSON_OUT.write_text(json.dumps(profile, indent=2) + "\n")
