@@ -13,4 +13,8 @@ Planned: an append-only `ledger.jsonl`, one JSON row per run, never rewritten. F
 - `cost_usd`
 - `predictions_path`
 
-The file is empty until the first run.
+Rung 2 rows also carry `config`, `predictions_sha256`, `n_rows`, `ci95_vs_prior` and
+`best_iterations`. Out-of-fold prediction files live in `data/predictions/` (gitignored) and are
+identified by the sha256 in the row.
+
+`rung-2-summary.json` holds the aggregates behind `docs/rung-2-features.md`.
