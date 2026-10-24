@@ -39,7 +39,10 @@ from llm_preference_audit.judge.haiku import (
     OUTPUT_SCHEMA,
     SYSTEM,
     HaikuBatchJudge,
+    build_params,
+    build_request,
     cost_usd,
+    parse_result,
 )
 from llm_preference_audit.judge.harness import combine, make_items, refusal_rate, status_counts
 from llm_preference_audit.profile import TOKENS_PER_WORD
@@ -169,16 +172,25 @@ def stage_estimate(_: argparse.Namespace) -> None:
     print(f"estimated cost ${estimate_usd(est_in, len(items)):.4f} at batch prices")
 
 
+def requests_sha256(items: list) -> str:
+    """Digest of the exact request bodies, so `submit` sends what `count` counted."""
+    body = json.dumps([build_request(i) for i in items], sort_keys=True)
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+def ledger_rows() -> list[dict]:
+    return [json.loads(x) for x in LEDGER.read_text().splitlines()] if LEDGER.exists() else []
+
+
 def stage_count(_: argparse.Namespace) -> None:
     import anthropic
 
     pilot, _m = load_pilot()
     items, _stats = build_items(pilot)
-    judge = HaikuBatchJudge()
     client = anthropic.Anthropic()
     counts = {}
     for k, item in enumerate(items):
-        p = judge.build_params(item)
+        p = build_params(item)
         r = client.messages.count_tokens(
             model=p["model"],
             system=p["system"],
@@ -189,7 +201,8 @@ def stage_count(_: argparse.Namespace) -> None:
         if (k + 1) % 100 == 0:
             print(f"counted {k + 1}/{len(items)}")
     WORK.mkdir(parents=True, exist_ok=True)
-    (WORK / "token_counts.json").write_text(json.dumps(counts) + "\n")
+    record = {"requests_sha256": requests_sha256(items), "counts": counts}
+    (WORK / "token_counts.json").write_text(json.dumps(record) + "\n")
     total = sum(counts.values())
     v = np.array(list(counts.values()))
     print(f"input tokens {total:,} (per call median {np.median(v):.0f}, max {v.max()})")
@@ -201,40 +214,58 @@ def stage_count(_: argparse.Namespace) -> None:
 def stage_submit(args: argparse.Namespace) -> None:
     require_clean()
     batch_file = WORK / "batch_id.txt"
+    lock = WORK / "submit.lock"
     if batch_file.exists():
         raise SystemExit(f"already submitted: {batch_file.read_text().strip()}")
+    if lock.exists():
+        raise SystemExit(f"{lock} exists without a batch id: check the Console before resubmitting")
     counts_file = WORK / "token_counts.json"
     if not counts_file.exists():
         raise SystemExit("run `count` first")
     pilot, _m = load_pilot()
     items, _stats = build_items(pilot)
-    counts = json.loads(counts_file.read_text())
-    if set(counts) != {i.custom_id for i in items}:
+    record = json.loads(counts_file.read_text())
+    if record["requests_sha256"] != requests_sha256(items):
         raise SystemExit("token counts do not match the current requests; re-run `count`")
-    est = estimate_usd(sum(counts.values()), len(items))
-    spent = sum(r.get("cost_usd", 0) for r in map(json.loads, LEDGER.read_text().splitlines()))
+    est = estimate_usd(sum(record["counts"].values()), len(items))
+    spent = sum(r.get("cost_usd", 0) for r in ledger_rows())
     print(f"estimate ${est:.4f}; ledger spend so far ${spent:.4f} of ${JUDGE_ALLOTMENT_USD}")
     if est > PILOT_CEILING_USD or spent + est > JUDGE_ALLOTMENT_USD:
         raise SystemExit("estimate exceeds the pilot ceiling or the judge allotment; stopping")
     if not args.yes:
         raise SystemExit("dry run: pass --yes to submit")
+    lock.write_text(datetime.now(UTC).isoformat() + "\n")  # left behind if create dies mid-way
     batch_id = HaikuBatchJudge().submit(items)
-    WORK.mkdir(parents=True, exist_ok=True)
     batch_file.write_text(batch_id + "\n")
+    lock.unlink()
     print(f"submitted {batch_id}")
+
+
+def lgbm_reference(pilot: pd.DataFrame, loss_judge: np.ndarray) -> dict | None:
+    """Rung 2's out-of-fold LightGBM (`full`) on the same pilot rows, paired with the judge."""
+    full = [r for r in ledger_rows() if r.get("config") == "full" and r.get("model") == "lightgbm"]
+    if not full or not Path(full[-1]["predictions_path"]).exists():
+        return None
+    oof = pd.read_parquet(full[-1]["predictions_path"]).set_index("id").loc[pilot["id"]]
+    loss_lgbm = row_losses(pilot["y"].to_numpy(), oof[["p_a", "p_b", "p_tie"]].to_numpy())
+    return {
+        "run_id": full[-1]["run_id"],
+        "log_loss": float(loss_lgbm.mean()),
+        "judge_gain_vs_lgbm": group_bootstrap_diff(loss_lgbm, loss_judge, pilot["group"]),
+    }
 
 
 def stage_collect(_: argparse.Namespace) -> None:
     sha = require_clean()
     batch_id = (WORK / "batch_id.txt").read_text().strip()
-    judge = HaikuBatchJudge()
     raw_file = WORK / "results.jsonl"
     if not raw_file.exists():
+        judge = HaikuBatchJudge()
         judge.wait(batch_id)
         raw = judge.collect(batch_id)
         raw_file.write_text("".join(json.dumps(r) + "\n" for r in raw))
     raw = [json.loads(line) for line in raw_file.read_text().splitlines()]
-    outputs = [judge.parse_result(r) for r in raw]
+    outputs = [parse_result(r) for r in raw]
 
     pilot, manifest = load_pilot()
     labels = load_train(RAW).set_index("id")["label"]
@@ -242,9 +273,13 @@ def stage_collect(_: argparse.Namespace) -> None:
     summary, P_cal = score(pilot, prior, outputs)
     _items, summary["truncation"] = build_items(pilot)
     summary["batch_id"] = batch_id
-    cost, ci, loss_cal = summary["cost_usd"], summary["gain_vs_prior"], summary["log_loss"]
+    summary["lgbm_reference"] = lgbm_reference(pilot, row_losses(pilot["y"].to_numpy(), P_cal))
     SUMMARY.write_text(json.dumps(summary, indent=2) + "\n")
-    _write_ledger(sha, pilot, P_cal, batch_id, cost, ci, loss_cal["matrix_cv"], summary)
+    if any(r.get("batch_id") == batch_id for r in ledger_rows()):
+        print(f"ledger already has batch {batch_id}; summary rewritten, no new row")
+        return
+    cost, ci, loss = summary["cost_usd"], summary["gain_vs_prior"], summary["log_loss"]
+    _write_ledger(sha, pilot, P_cal, batch_id, cost, ci, loss["matrix_cv"], summary)
 
 
 def score(pilot: pd.DataFrame, prior: np.ndarray, outputs: list) -> tuple[dict, np.ndarray]:
@@ -266,6 +301,8 @@ def score(pilot: pd.DataFrame, prior: np.ndarray, outputs: list) -> tuple[dict, 
     ok_rows = ~comb["fallback"]
     wa, wb = pilot["words_a"].to_numpy(), pilot["words_b"].to_numpy()
     cost = cost_usd(outputs)
+    ok = [o for o in outputs if o.status == "ok"]
+    agree = [o.winner == ("A", "B", "tie")[int(np.argmax([o.p_a, o.p_b, o.p_tie]))] for o in ok]
 
     summary = {
         "run": "pilot-500",
@@ -273,7 +310,8 @@ def score(pilot: pd.DataFrame, prior: np.ndarray, outputs: list) -> tuple[dict, 
         "n_calls": len(outputs),
         "status_counts": status_counts(outputs),
         "refusal_rate": refusal_rate(outputs),
-        "fallback_row_share": float(comb["fallback"].mean()),
+        "fallback_row_share": float(comb["fallback"].mean()),  # rows with any non-ok call
+        "winner_matches_argmax_share": float(np.mean(agree)) if agree else None,
         "log_loss": {
             "prior_oof": float(loss_prior.mean()),
             "raw_swap_avg": log_loss(y, P_raw),
@@ -287,7 +325,8 @@ def score(pilot: pd.DataFrame, prior: np.ndarray, outputs: list) -> tuple[dict, 
         "gain_vs_prior": ci,
         "gate_pass": bool(ci["lo"] > 0),
         "position": {
-            "swap_flip": swap_flip_readout(comb["P_ab"], comb["P_ba"]),
+            # raw arrays keep NaN for failed calls, so prior-filled rows can't count as flips
+            "swap_flip": swap_flip_readout(comb["raw_ab"], comb["raw_ba"][:, [1, 0, 2]]),
             "first_position": first_position_readout(comb["raw_ab"], comb["raw_ba"], groups),
         },
         "verbosity_calibrated": calibrated_longer_readout(y, P_cal, wa, wb, groups),
