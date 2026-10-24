@@ -62,3 +62,15 @@ def test_overconfident_predictor_has_positive_diff():
     assert r["model_share"] == pytest.approx(0.9, abs=1e-9)
     assert r["diff"] > 0.25 and r["ci95"][0] > 0
     assert sum(b["n"] for b in r["buckets"]) == r["n"] and len(r["buckets"]) == 5
+
+
+def test_calibrated_readout_handles_empty_responses():
+    from llm_preference_audit.bias import calibrated_longer_readout
+
+    y, wa, wb, la, g = _longer_frame(p_human=0.6)
+    wa = wa.copy()
+    wa[:50] = 0  # empty response a
+    y = np.where(wa > wb, 0, 1)
+    la = wa > wb
+    r = calibrated_longer_readout(y, _probs(la, 0.6), wa, wb, g)
+    assert all(np.isfinite([b["lo"] for b in r["buckets"]] + [b["hi"] for b in r["buckets"]]))

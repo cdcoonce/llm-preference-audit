@@ -16,7 +16,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from llm_preference_audit.bias import identical_rows_readout, longer_wins_readout
+from llm_preference_audit.bias import (
+    calibrated_longer_readout,
+    identical_rows_readout,
+    longer_wins_readout,
+)
 from llm_preference_audit.data import LABELS, load_train
 from llm_preference_audit.features import RESPONSE_FEATURES, build_features, feature_columns
 from llm_preference_audit.scoring import (
@@ -173,7 +177,8 @@ def main(argv: list[str]) -> None:
             "top_features": [
                 {"feature": k, "gain_share": float(v / top.sum())} for k, v in top.head(20).items()
             ],
-            "longer_wins": longer_wins_readout(y, P, words_a, words_b),
+            "direction_agreement": longer_wins_readout(y, P, words_a, words_b),
+            "verbosity_calibrated": calibrated_longer_readout(y, P, words_a, words_b, groups),
             "identical_rows": identical_rows_readout(P, ident),
             "raw_asymmetry": {
                 "mean": float(res["asym"].mean()),

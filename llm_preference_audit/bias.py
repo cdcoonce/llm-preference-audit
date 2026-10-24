@@ -54,7 +54,7 @@ def calibrated_longer_readout(
 
     Among non-ties with unequal word counts: the human share where the longer response won,
     versus the model's mean p_longer / (p_longer + p_shorter). diff = model - human, with a
-    paired group-bootstrap 95% CI. Buckets are quintiles of |log word ratio|.
+    paired group-bootstrap 95% CI. Buckets are quintiles of |log1p word ratio|.
     """
     m = (y != 2) & (words_a != words_b)
     wa, wb = words_a[m].astype(float), words_b[m].astype(float)
@@ -65,7 +65,7 @@ def calibrated_longer_readout(
     model = p_long / (p_long + p_short)
     human = ((y[m] == 0) == longer_is_a).astype(float)
     boot = group_bootstrap_diff(model, human, groups[m])
-    mag = np.abs(np.log(wa / wb))
+    mag = np.abs(np.log1p(wa) - np.log1p(wb))  # log1p: empty responses are valid
     edges = np.quantile(mag, np.linspace(0, 1, n_buckets + 1))
     idx = np.clip(np.searchsorted(edges, mag, side="right") - 1, 0, n_buckets - 1)
     buckets = [
