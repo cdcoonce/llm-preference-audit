@@ -171,6 +171,11 @@ class FakeBatches:
 class FakeClient:
     def __init__(self, results, **kw):
         self.messages = _Obj(batches=FakeBatches(results, **kw))
+        self.options = []
+
+    def with_options(self, **kw):
+        self.options.append(kw)
+        return self
 
 
 def _judge(results, monkeypatch, **kw):
@@ -222,3 +227,10 @@ def test_recorded_pilot_responses_parse_ok():
         out = parse_result(raw)
         assert out.status == "ok" and out.input_tokens > 0 and out.output_tokens > 0
         assert math.isclose(out.p_a + out.p_b + out.p_tie, 1.0)
+
+
+def test_submit_disables_sdk_retries_on_create(monkeypatch):
+    """A retried create after a read timeout could bill a second, unrecorded batch."""
+    j, client, _ = _judge([RAW["ok-1"]], monkeypatch)
+    j.submit([JudgeItem("ok-1", "p", "a", "b")])
+    assert client.options == [{"max_retries": 0}]

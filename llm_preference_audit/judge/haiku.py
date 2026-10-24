@@ -155,7 +155,9 @@ class HaikuBatchJudge:
         return self._client
 
     def submit(self, items: Sequence[JudgeItem]) -> str:
-        batch = self.client.messages.batches.create(requests=[build_request(i) for i in items])
+        # No SDK retries: a retried create after a read timeout can bill a second, orphan batch.
+        client = self.client.with_options(max_retries=0)
+        batch = client.messages.batches.create(requests=[build_request(i) for i in items])
         return batch.id
 
     def wait(self, batch_id: str) -> None:
