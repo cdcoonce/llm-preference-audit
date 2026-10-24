@@ -86,3 +86,38 @@ def calibrated_longer_readout(
         "ci95": [boot["lo"], boot["hi"]],
         "buckets": buckets,
     }
+
+
+def swap_flip_readout(P_ab: np.ndarray, P_ba: np.ndarray) -> dict:
+    """Order sensitivity of a judge. Both arrays are (n, 3) in original label order (the
+    swapped call already mapped back); rows with a NaN in either are excluded."""
+    P_ab, P_ba = np.asarray(P_ab, dtype=float), np.asarray(P_ba, dtype=float)
+    ok = ~(np.isnan(P_ab).any(axis=1) | np.isnan(P_ba).any(axis=1))
+    a, b = P_ab[ok], P_ba[ok]
+    return {
+        "n": int(ok.sum()),
+        "flip_rate": float((a.argmax(axis=1) != b.argmax(axis=1)).mean()),
+        "mean_abs_diff": float(np.abs(a - b).max(axis=1).mean()),
+    }
+
+
+def first_position_readout(raw_ab: np.ndarray, raw_ba: np.ndarray, groups: np.ndarray) -> dict:
+    """Position bias. Raw arrays are (n, 3) in presented order (col 0 = shown first, col 1 =
+    shown second), NaN rows for failed calls. Each valid call is one observation; a row's
+    group applies to both its calls. diff = mean p_first - mean p_second."""
+    raw = np.vstack([raw_ab, raw_ba]).astype(float)
+    g = np.concatenate([np.asarray(groups), np.asarray(groups)])
+    ok = ~np.isnan(raw).any(axis=1)
+    raw, g = raw[ok], g[ok]
+    p_first, p_second = raw[:, 0], raw[:, 1]
+    boot = group_bootstrap_diff(p_first, p_second, g)
+    top = raw.argmax(axis=1)
+    nontie = top != 2
+    return {
+        "n_calls": int(ok.sum()),
+        "mean_p_first": float(p_first.mean()),
+        "mean_p_second": float(p_second.mean()),
+        "diff": boot["diff"],
+        "ci95": [boot["lo"], boot["hi"]],
+        "share_first_wins_argmax_nontie": float((top[nontie] == 0).mean()),
+    }

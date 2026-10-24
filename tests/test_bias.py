@@ -74,3 +74,59 @@ def test_calibrated_readout_handles_empty_responses():
     la = wa > wb
     r = calibrated_longer_readout(y, _probs(la, 0.6), wa, wb, g)
     assert all(np.isfinite([b["lo"] for b in r["buckets"]] + [b["hi"] for b in r["buckets"]]))
+
+
+def test_swap_flip_readout_hand_example_excludes_nan_rows():
+    from llm_preference_audit.bias import swap_flip_readout
+
+    nan = np.full(3, np.nan)
+    P_ab = np.array([[0.6, 0.3, 0.1], [0.2, 0.5, 0.3], nan, [0.1, 0.1, 0.8]])
+    P_ba = np.array([[0.2, 0.6, 0.2], [0.2, 0.4, 0.4], [0.3, 0.3, 0.4], [0.1, 0.1, 0.8]])
+    r = swap_flip_readout(P_ab, P_ba)
+    assert r["n"] == 3
+    assert r["flip_rate"] == pytest.approx(1 / 3)  # only row 0 flips
+    assert r["mean_abs_diff"] == pytest.approx((0.4 + 0.1 + 0.0) / 3)
+
+
+def test_swap_flip_readout_excludes_row_with_nan_in_either_order():
+    from llm_preference_audit.bias import swap_flip_readout
+
+    ok = np.array([[0.5, 0.3, 0.2]])
+    nan = np.full((1, 3), np.nan)
+    assert swap_flip_readout(np.vstack([ok, ok]), np.vstack([ok, nan]))["n"] == 1
+
+
+def test_first_position_readout_hand_example():
+    from llm_preference_audit.bias import first_position_readout
+
+    nan = np.full(3, np.nan)
+    ab = np.array([[0.6, 0.3, 0.1], [0.2, 0.2, 0.6], nan])
+    ba = np.array([[0.5, 0.4, 0.1], [0.3, 0.5, 0.2], [0.4, 0.45, 0.15]])
+    r = first_position_readout(ab, ba, np.array([0, 1, 2]))
+    assert r["n_calls"] == 5
+    assert r["mean_p_first"] == pytest.approx((0.6 + 0.2 + 0.5 + 0.3 + 0.4) / 5)
+    assert r["mean_p_second"] == pytest.approx((0.3 + 0.2 + 0.4 + 0.5 + 0.45) / 5)
+    assert r["diff"] == pytest.approx(r["mean_p_first"] - r["mean_p_second"])
+    # the 0.6-tie call is dropped; first wins in 2 of the 4 non-tie calls
+    assert r["share_first_wins_argmax_nontie"] == pytest.approx(2 / 4)
+
+
+def test_first_position_readout_detects_first_position_bias():
+    from llm_preference_audit.bias import first_position_readout
+
+    n = 400
+    raw = np.tile([0.6, 0.3, 0.1], (n, 1))
+    r = first_position_readout(raw, raw, np.arange(n) // 2)
+    assert r["diff"] == pytest.approx(0.3)
+    assert r["ci95"][0] > 0
+    assert r["share_first_wins_argmax_nontie"] == 1.0
+
+
+def test_first_position_readout_symmetric_judge_has_zero_diff():
+    from llm_preference_audit.bias import first_position_readout
+
+    n = 400
+    raw = np.tile([0.45, 0.45, 0.1], (n, 1))
+    r = first_position_readout(raw, raw, np.arange(n) // 2)
+    assert r["diff"] == pytest.approx(0.0)
+    assert r["ci95"][0] <= 0 <= r["ci95"][1]
