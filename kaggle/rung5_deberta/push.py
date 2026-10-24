@@ -67,6 +67,7 @@ import sys as _sys
 
 if "--worker" not in _sys.argv[1:]:  # worker subprocesses re-exec this file; skip the install
     _sp.check_call([_sys.executable, "-m", "pip", "install", "-q", "--no-deps",
+                    "--ignore-requires-python",  # Kaggle may run Python 3.11
                     "git+https://github.com/{repo}@{sha}"])
     _sp.check_call([_sys.executable, "-m", "pip", "install", "-q", "sentencepiece", "protobuf"])
     _sys.argv = ["train.py", *{args!r}]

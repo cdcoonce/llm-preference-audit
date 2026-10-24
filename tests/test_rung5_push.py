@@ -37,6 +37,7 @@ def test_render_script_and_metadata(tmp_path, monkeypatch):
     tree = ast.parse(code)  # generated script is valid Python
     assert isinstance(tree.body[1], ast.ImportFrom) and tree.body[1].module == "__future__"
     assert "git+https://github.com/o/r@abc123" in code and "--no-deps" in code
+    assert "--ignore-requires-python" in code  # Kaggle may run an older Python
     assert "'--git-sha', 'abc123'" in code and "'--tag', 't1'" in code
     assert code.index("generated kernel header") < code.index("import torch")
     meta = json.loads((build / "kernel-metadata.json").read_text())

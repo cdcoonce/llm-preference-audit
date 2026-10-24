@@ -454,7 +454,8 @@ def run_probe(args) -> None:
             "gpu_hours_per_fold": per_fold,
             "gpu_hours_5_folds": 5 * per_fold,
             "gpu_hours_5_folds_plus_ablation_fold": 6 * per_fold,
-            "wall_hours_on_2_gpus_5_folds": 5 * per_fold / 2,
+            # two folds run at a time, so 5 folds take ceil(5 / 2) = 3 rounds
+            "wall_hours_on_2_gpus_5_folds": 3 * per_fold,
             "note": "single-GPU measured rates; excludes model load, fitting and cache time",
         }
     (out / "probe.json").write_text(json.dumps(probe, indent=2) + "\n")
