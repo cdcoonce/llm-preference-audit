@@ -68,20 +68,33 @@ Length features (chars, words, newlines) carry most of the gain. The top 20 are 
 
 ## Verbosity: model versus humans
 
-Among the 35,436 cv non-ties with unequal word counts:
+Among the 35,436 cv non-ties with unequal word counts, humans picked the longer response 61.35% of
+the time. The like-for-like model figure is the mean of p_longer / (p_longer + p_shorter) from the
+out-of-fold predictions: the probability that the longer response wins given there is no tie.
+`diff` is model minus human, with a 95% paired group-bootstrap CI.
 
-| | Longer response is favoured |
-|---|---|
-| Human labels | 61.35% (61.38% on all rows in the data profile) |
-| `length_only` model (p_a vs p_b) | 96.95% |
-| `full` model | 85.37% |
-| `full_no_swap` model | 84.60% |
+| Config | Model share | Diff vs human [95% CI] | Direction agreement |
+|---|---|---|---|
+| `length_only` | 60.41% | -0.94 pts [-1.45, -0.43] | 96.95% |
+| `full` | 61.40% | +0.05 pts [-0.42, +0.54] | 85.37% |
+| `full_no_swap` | 61.29% | -0.06 pts [-0.53, +0.44] | 84.60% |
 
-These two columns are not the same kind of number. Humans picked the longer answer 61% of the time.
-The model's figure is how often it puts the higher win probability on the longer answer, not how
-often it is right. Even so, a model fitted on these labels leans on length much harder than the
-humans did on any single comparison: it turns a modest average tendency into a near-rule whenever
-length is the strongest signal it has.
+Direction agreement is the share of rows where p_longer > p_shorter. It is expected to be near 100%
+for any calibrated model when the longer response wins 61% of the time, so it is not a measure of
+how hard the model leans on length.
+
+By size of the length gap (quintiles of |log1p word ratio|), `full` tracks the human share closely:
+
+| Length gap (|log1p ratio|) | n | Human share | `full` model share |
+|---|---|---|---|
+| 0.001 to 0.172 | 7,083 | 52.18% | 52.42% |
+| 0.172 to 0.377 | 7,091 | 57.42% | 57.73% |
+| 0.377 to 0.649 | 7,088 | 62.56% | 62.49% |
+| 0.649 to 1.17 | 7,084 | 65.99% | 65.93% |
+| 1.17 to 6.42 | 7,090 | 68.59% | 68.41% |
+
+The other two configs are in the summary JSON. `length_only` runs about 0.4 to 1.7 points under the
+human share in the upper buckets.
 
 ## Symmetry check
 
@@ -104,6 +117,8 @@ Cheap text-shape features beat the class prior clearly: log loss falls from 1.09
 improvement whose 95% CI is far from zero. Length alone gets about two thirds of that gain, and the
 other features add a further 0.022. Position symmetry costs nothing and helps a little: the swapped
 and averaged model is 0.0024 better than the unsymmetrised one, and it has no preference for position a
-by construction. The model leans on length more than the human labels do, which is the shape of
-verbosity bias a later rung can compare against LLM judges. The gain is still modest: the model is
+by construction. The `full` model reproduces the human verbosity preference at its observed
+strength (61.40% versus 61.35%, and close in every length-gap bucket); it does not exaggerate it.
+What stands out is how much of the learnable signal length carries: `length_only` gets 63% of the
+`full` gain over the prior (0.0382 of 0.0607). The gain is still modest: the model is
 well calibrated but far from sharp, so most pairs stay near the prior.
