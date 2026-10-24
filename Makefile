@@ -27,3 +27,9 @@ data:
 
 data-kaggle:
 	uv run python scripts/download_kaggle.py
+
+split:
+	uv run python scripts/make_split.py
+
+profile:
+	uv run python scripts/make_profile.py

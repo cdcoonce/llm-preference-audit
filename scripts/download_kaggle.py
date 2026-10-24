@@ -16,7 +16,7 @@ DEST = Path("data/kaggle")
 def main() -> int:
     DEST.mkdir(parents=True, exist_ok=True)
     cmd = ["kaggle", "competitions", "download", "-c", COMPETITION, "-p", str(DEST)]
-    result = subprocess.run(cmd)
+    result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
         print(f"kaggle download failed (exit {result.returncode})", file=sys.stderr)
         return result.returncode

@@ -14,3 +14,6 @@ data/
 .env
 *.ipynb_checkpoints
 .ipynb_checkpoints/
+
+# Split manifest is ~1.9 MB (over the leak-check limit); only its digest is committed
+splits/split_manifest.csv
