@@ -188,6 +188,41 @@ def test_collect_stage_scores_and_appends_one_ledger_row(staged):
     assert summary["status_counts"]["ok"] == len(raws) and summary["gate_pass"] is True
 
 
+def test_collect_rerun_leaves_recorded_summary_untouched(staged):
+    _, tmp = staged
+    (tmp / "work" / "batch_id.txt").write_text("msgbatch_test\n")
+    raws = [_raw(o) for o in _judge(staged[0], 0.7)]
+    (tmp / "work" / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in raws))
+    pilot_mod.stage_collect(Namespace())
+    (tmp / "summary.json").write_text("RECORDED\n")
+    pilot_mod.stage_collect(Namespace())
+    assert (tmp / "summary.json").read_text() == "RECORDED\n"
+
+
+def test_collect_refuses_ledger_row_when_too_many_calls_failed(staged):
+    pilot, tmp = staged
+    (tmp / "work" / "batch_id.txt").write_text("msgbatch_test\n")
+    raws = [_raw(o) for o in _judge(pilot, 0.7)]
+    for r in raws[:5]:  # 5 of 120 calls expired: 4.2% > 2%
+        r["result"] = {"type": "expired"}
+    (tmp / "work" / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in raws))
+    with pytest.raises(SystemExit, match="not ok"):
+        pilot_mod.stage_collect(Namespace())
+    assert not (tmp / "ledger.jsonl").exists()
+    assert json.loads((tmp / "summary.json").read_text())["status_counts"]["errored"] == 5
+
+
+def test_count_refuses_a_tiny_sample(staged, monkeypatch):
+    import anthropic
+
+    def no_network():
+        raise AssertionError("count reached the API client")
+
+    monkeypatch.setattr(anthropic, "Anthropic", no_network)
+    with pytest.raises(SystemExit, match="below"):
+        pilot_mod.stage_count(Namespace(sample=50))
+
+
 # ---------------------------------------------------------------- full-run extensions
 
 
@@ -338,6 +373,7 @@ def test_sampled_count_uses_ratio_estimator(staged, monkeypatch):
     import anthropic
 
     monkeypatch.setattr(anthropic, "Anthropic", lambda: Namespace(messages=FakeMessages()))
+    monkeypatch.setattr(pilot_mod, "MIN_COUNT_SAMPLE", 1)  # 60-row synthetic frame
     pilot_mod.stage_count(Namespace(sample=20))
     rec = json.loads((tmp / "work" / "token_counts.json").read_text())
     assert rec["sampled"] is True and rec["n_counted"] == 40 == len(rec["counts"])
@@ -417,9 +453,10 @@ def test_collect_over_chunks_scores_and_appends_one_ledger_row(staged, judge, mo
     assert summary["n_chunks"] == 3 and summary["batch_ids"] == rows[0]["batch_ids"]
     assert summary["status_counts"]["ok"] == len(items) and summary["gate_pass"] is True
     assert summary["position"]["swap_flip"]["flip_rate"] == 0
-    assert sorted(p.name for p in work.glob("results*.jsonl")) == [
-        "results-1.jsonl",
-        "results-2.jsonl",
+    names = sorted(p.name for p in work.glob("results*.jsonl"))
+    assert names == [
+        f"results-1-{state['chunks']['1']}.jsonl",
+        f"results-2-{state['chunks']['2']}.jsonl",
         "results.jsonl",
     ]
 

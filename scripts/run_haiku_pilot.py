@@ -65,6 +65,8 @@ N_PILOT = 500
 SAMPLE_SALT = "haiku-pilot-2026-10-23"
 COUNT_SALT = "haiku-count-2026-10-24"
 JUDGE_ALLOTMENT_USD = 40.0  # decision #20: judges get $40 of the $150 cap
+MAX_NONOK_SHARE = 0.02  # refuse a ledger row when more calls than this failed or expired
+MIN_COUNT_SAMPLE = 200  # rows; smaller samples make the bootstrap p99 meaningless
 EST_OUTPUT_TOKENS = 400  # per call fallback when no pilot summary exists (thinking + JSON)
 OUTPUT_SAFETY = 2.0  # multiplier on the measured pilot output rate, for the gate only
 CHUNK_REQUESTS = 10_000  # Batch API caps: 100,000 requests / 256 MB per batch
@@ -124,8 +126,8 @@ def config() -> dict:
         "schema": OUTPUT_SCHEMA,
         "prompt_budget_tokens": PROMPT_BUDGET_TOKENS,
         "response_budget_tokens": RESPONSE_BUDGET_TOKENS,
-        "run": RUN,
-        "n_rows": RUNS[RUN]["n_rows"],
+        # the pilot keeps its original shape so its ledger config_hash still reproduces
+        **({"n_pilot": N_PILOT} if RUN == "pilot-500" else {"run": RUN, "n_rows": None}),
         "sample_salt": SAMPLE_SALT,
         "orders": ["ab", "ba"],
         "calibration": "matrix scaling (multinomial LR on log p), cross-fitted by fold",
@@ -317,6 +319,10 @@ def stage_count(args: argparse.Namespace) -> None:
     sample = getattr(args, "sample", None)
     if sample is None:
         sample = RUNS[RUN]["default_sample"]
+    if sample is not None and sample < MIN_COUNT_SAMPLE:
+        raise SystemExit(
+            f"--sample {sample} is below {MIN_COUNT_SAMPLE}; the p99 would mean little"
+        )
     keep = count_sample_ids([str(i) for i in pilot["id"]], sample)
     todo = [i for i in items if row_key(i.custom_id) in keep]
     client = anthropic.Anthropic()
@@ -468,9 +474,13 @@ def lgbm_reference(pilot: pd.DataFrame, loss_judge: np.ndarray) -> dict | None:
     }
 
 
-def raw_path(k: int) -> Path:
-    """Chunk k's saved results; the pilot's single chunk keeps its original file name."""
-    return WORK / ("results.jsonl" if RUN == "pilot-500" and k == 0 else f"results-{k}.jsonl")
+def raw_path(k: int, batch_id: str) -> Path:
+    """Chunk k's saved results, named by batch so a resubmitted chunk never reuses old ones.
+
+    The pilot's single chunk keeps its original file name."""
+    if RUN == "pilot-500" and k == 0:
+        return WORK / "results.jsonl"
+    return WORK / f"results-{k}-{batch_id}.jsonl"
 
 
 def batch_ids_of(row: dict) -> list[str]:
@@ -486,10 +496,13 @@ def stage_collect(_: argparse.Namespace) -> None:
             f"only {len(state['chunks'])} of {n_chunks} chunks are submitted; run `submit` first"
         )
     batch_ids = sorted(state["chunks"].values())
+    if any(batch_ids_of(r) == batch_ids for r in ledger_rows()):
+        print(f"ledger already has batches {batch_ids}; nothing rewritten")
+        return
     judge = None
     raw: list[dict] = []
     for k in range(n_chunks):
-        path = raw_path(k)
+        path = raw_path(k, state["chunks"][str(k)])
         if not path.exists():
             judge = judge or HaikuBatchJudge()
             judge.wait(state["chunks"][str(k)])
@@ -511,9 +524,12 @@ def stage_collect(_: argparse.Namespace) -> None:
         summary["batch_id"] = batch_ids[0]
     summary["lgbm_reference"] = lgbm_reference(pilot, row_losses(pilot["y"].to_numpy(), P_cal))
     SUMMARY.write_text(json.dumps(summary, indent=2) + "\n")
-    if any(batch_ids_of(r) == batch_ids for r in ledger_rows()):
-        print(f"ledger already has batches {batch_ids}; summary rewritten, no new row")
-        return
+    nonok = 1 - summary["status_counts"].get("ok", 0) / summary["n_calls"]
+    if nonok > MAX_NONOK_SHARE:
+        raise SystemExit(
+            f"{nonok:.1%} of calls are not ok ({summary['status_counts']}); summary written, "
+            f"no ledger row. Resubmit the failed requests before recording this run."
+        )
     cost, ci, loss = summary["cost_usd"], summary["gain_vs_prior"], summary["log_loss"]
     _write_ledger(sha, pilot, P_cal, batch_ids, cost, ci, loss["matrix_cv"], summary)
 
