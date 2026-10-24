@@ -1,10 +1,12 @@
-"""Rung 3 pilot: the Haiku judge on 500 cv pairs, both A/B orders, through the Batch API.
+"""Rung 3: the Haiku judge on cv pairs, both A/B orders, through the Batch API.
 
-Stages, run in order (each is resumable; artifacts live in gitignored data/judge/pilot-500/):
+Runs (--run): pilot-500 (default, 500 sampled cv rows) or full-cv (every cv row with a label).
+Stages, run in order (each is resumable; artifacts live in gitignored data/judge/<run>/):
   estimate  offline: sample the pairs, truncate, print local token and cost estimates
-  count     count input tokens with messages.count_tokens (free) and print the cost estimate
-  submit    submit one batch of 2 x 500 requests; refuses without --yes or past the allotment
-  collect   wait for the batch, save raw results, score, append a ledger row, write the summary
+  count     count input tokens with messages.count_tokens (free); `--sample N` counts a
+            deterministic row sample and projects the total with a ratio estimator
+  submit    submit the batches (chunks of CHUNK_REQUESTS; resumable); needs --yes
+  collect   wait for every chunk, score, append one ledger row, write the run's summary
 
 Only cv rows are ever sent; the locked test split is never read past the manifest. Commit the
 code before `submit` and `collect`: the ledger row records HEAD as git_sha.
@@ -56,15 +58,50 @@ from llm_preference_audit.truncate import (
 )
 
 RAW = Path("data/raw/train.csv")  # the Hugging Face copy: the only one sent to the API
-WORK = Path("data/judge/pilot-500")
 LEDGER = Path("results/ledger.jsonl")
 PRED_DIR = Path("data/predictions")
-SUMMARY = Path("results/rung-3-pilot.json")
+PILOT_SUMMARY = Path("results/rung-3-pilot.json")  # measured pilot rates feed the estimates
 N_PILOT = 500
 SAMPLE_SALT = "haiku-pilot-2026-10-23"
+COUNT_SALT = "haiku-count-2026-10-24"
 JUDGE_ALLOTMENT_USD = 40.0  # decision #20: judges get $40 of the $150 cap
-PILOT_CEILING_USD = 1.0  # refuse to submit if the estimate is above this
-EST_OUTPUT_TOKENS = 400  # per call, for the pre-submit estimate only (thinking + JSON)
+EST_OUTPUT_TOKENS = 400  # per call fallback when no pilot summary exists (thinking + JSON)
+OUTPUT_SAFETY = 2.0  # multiplier on the measured pilot output rate, for the gate only
+CHUNK_REQUESTS = 10_000  # Batch API caps: 100,000 requests / 256 MB per batch
+MAX_CHUNK_BYTES = 200_000_000
+BOOT_RESAMPLES = 1000
+BOOT_SEED = 20261024
+
+RUNS = {
+    "pilot-500": {
+        "n_rows": N_PILOT,
+        "work": Path("data/judge/pilot-500"),
+        "summary": Path("results/rung-3-pilot.json"),
+        "ledger_config": "haiku_pilot_500",
+        "split_tag": "cv-pilot",
+        "ceiling_usd": 1.0,  # refuse to submit if the estimate is above this
+        "default_sample": None,  # count every request
+        "id_tag": "haiku-pilot",
+    },
+    "full-cv": {
+        "n_rows": None,  # every cv row with a label
+        "work": Path("data/judge/full-cv"),
+        "summary": Path("results/rung-3-full.json"),
+        "ledger_config": "haiku_full_cv",
+        "split_tag": "cv-full",
+        "ceiling_usd": None,  # only the allotment binds
+        "default_sample": 2000,
+        "id_tag": "haiku-full",
+    },
+}
+RUN = "pilot-500"
+WORK = RUNS[RUN]["work"]  # the active run's paths; select_run() rebinds them
+SUMMARY = RUNS[RUN]["summary"]
+
+
+def select_run(name: str) -> None:
+    global RUN, WORK, SUMMARY
+    RUN, WORK, SUMMARY = name, RUNS[name]["work"], RUNS[name]["summary"]
 
 
 def git(*args: str) -> str:
@@ -87,7 +124,8 @@ def config() -> dict:
         "schema": OUTPUT_SCHEMA,
         "prompt_budget_tokens": PROMPT_BUDGET_TOKENS,
         "response_budget_tokens": RESPONSE_BUDGET_TOKENS,
-        "n_pilot": N_PILOT,
+        "run": RUN,
+        "n_rows": RUNS[RUN]["n_rows"],
         "sample_salt": SAMPLE_SALT,
         "orders": ["ab", "ba"],
         "calibration": "matrix scaling (multinomial LR on log p), cross-fitted by fold",
@@ -96,6 +134,16 @@ def config() -> dict:
 
 def config_hash() -> str:
     return hashlib.sha256(json.dumps(config(), sort_keys=True).encode()).hexdigest()
+
+
+def sample_rows(cv: pd.DataFrame, n_rows: int | None) -> pd.DataFrame:
+    """The run's rows, sorted by id: every row for None, else the n smallest salted hashes."""
+    if n_rows is None:
+        return cv.sort_values("id").reset_index(drop=True)
+    cv = cv.assign(
+        rank=[hashlib.sha256(f"{SAMPLE_SALT}:{i}".encode()).hexdigest() for i in cv["id"]]
+    )
+    return cv.sort_values("rank").head(n_rows).sort_values("id").reset_index(drop=True)
 
 
 def load_pilot() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -111,8 +159,7 @@ def load_pilot() -> tuple[pd.DataFrame, pd.DataFrame]:
         group=m.loc[df["id"], "group"].to_numpy(),
     )
     cv = df[(df["split"] == "cv") & df["label"].notna()].copy()
-    cv["rank"] = [hashlib.sha256(f"{SAMPLE_SALT}:{i}".encode()).hexdigest() for i in cv["id"]]
-    pilot = cv.sort_values("rank").head(N_PILOT).sort_values("id").reset_index(drop=True)
+    pilot = sample_rows(cv, RUNS[RUN]["n_rows"])
     assert_cv_only(pilot["id"].to_numpy(), manifest)
     pilot["y"] = pilot["label"].astype(str).map({c: i for i, c in enumerate(LABELS)}).astype(int)
     for col, short in (("prompt", "prompt"), ("response_a", "a"), ("response_b", "b")):
@@ -144,8 +191,17 @@ def build_items(pilot: pd.DataFrame) -> tuple[list, dict]:
     return items, stats
 
 
-def estimate_usd(input_tokens: int, n_calls: int) -> float:
-    out = n_calls * EST_OUTPUT_TOKENS
+def output_tokens_per_call() -> float:
+    """Gate estimate of output tokens per call: the measured pilot rate x OUTPUT_SAFETY."""
+    if PILOT_SUMMARY.exists():
+        pilot = json.loads(PILOT_SUMMARY.read_text())
+        if pilot.get("n_calls"):
+            return pilot["tokens"]["output"] / pilot["n_calls"] * OUTPUT_SAFETY
+    return float(EST_OUTPUT_TOKENS)
+
+
+def estimate_usd(input_tokens: float, n_calls: int) -> float:
+    out = n_calls * output_tokens_per_call()
     return (input_tokens * BATCH_INPUT_USD_PER_MTOK + out * BATCH_OUTPUT_USD_PER_MTOK) / 1e6
 
 
@@ -161,35 +217,111 @@ def prior_by_fold(manifest: pd.DataFrame, labels: pd.Series, folds: np.ndarray) 
     return P
 
 
+def local_tokens(item) -> float:
+    """Local input-token estimate for one request: words x TOKENS_PER_WORD."""
+    words = len(f"{SYSTEM} {item.prompt} {item.response_a} {item.response_b}".split())
+    return words * TOKENS_PER_WORD
+
+
+def row_key(custom_id: str) -> str:
+    return custom_id.rsplit("-", 1)[0]
+
+
+def chunk_items(items: list) -> list[list]:
+    """Split into chunks of at most CHUNK_REQUESTS requests; a row's -ab/-ba stay together."""
+    rows: list[list] = []
+    for item in items:
+        if rows and row_key(rows[-1][0].custom_id) == row_key(item.custom_id):
+            rows[-1].append(item)
+        else:
+            rows.append([item])
+    chunks: list[list] = []
+    size = 0
+    for row in rows:
+        if not chunks or size + len(row) > CHUNK_REQUESTS:
+            chunks.append([])
+            size = 0
+        chunks[-1].extend(row)
+        size += len(row)
+    return chunks
+
+
+def chunk_bytes(chunk: list) -> int:
+    return len(json.dumps([build_request(i) for i in chunk]).encode())
+
+
 def stage_estimate(_: argparse.Namespace) -> None:
     pilot, _m = load_pilot()
     items, stats = build_items(pilot)
-    words = sum(len(f"{SYSTEM} {i.prompt} {i.response_a} {i.response_b}".split()) for i in items)
-    est_in = int(words * TOKENS_PER_WORD)
-    print(f"pilot rows {len(pilot)}, calls {len(items)}, folds {sorted(set(pilot.fold))}")
+    est_in = int(sum(local_tokens(i) for i in items))
+    chunks = chunk_items(items)
+    print(f"run {RUN}: rows {len(pilot)}, calls {len(items)}, folds {sorted(set(pilot.fold))}")
     print(json.dumps(stats, indent=2))
     print(f"local input-token estimate {est_in:,} (words x {TOKENS_PER_WORD})")
     print(f"estimated cost ${estimate_usd(est_in, len(items)):.4f} at batch prices")
+    print(f"output tokens per call for the gate {output_tokens_per_call():.1f}")
+    biggest = max(chunk_bytes(c) for c in chunks)
+    print(f"chunks {len(chunks)} (<= {CHUNK_REQUESTS} requests), biggest {biggest:,} bytes")
 
 
 def requests_sha256(items: list) -> str:
     """Digest of the exact request bodies, so `submit` sends what `count` counted."""
-    body = json.dumps([build_request(i) for i in items], sort_keys=True)
-    return hashlib.sha256(body.encode()).hexdigest()
+    h = hashlib.sha256()
+    h.update(b"[")
+    for n, item in enumerate(items):
+        h.update((b", " if n else b"") + json.dumps(build_request(item), sort_keys=True).encode())
+    h.update(b"]")
+    return h.hexdigest()
 
 
 def ledger_rows() -> list[dict]:
     return [json.loads(x) for x in LEDGER.read_text().splitlines()] if LEDGER.exists() else []
 
 
-def stage_count(_: argparse.Namespace) -> None:
+def count_sample_ids(row_ids, n: int | None) -> set[str]:
+    """Deterministic row sample for token counting: the n smallest salted hashes."""
+    row_ids = [str(r) for r in row_ids]
+    if n is None or n >= len(row_ids):
+        return set(row_ids)
+    key = lambda r: hashlib.sha256(f"{COUNT_SALT}:{r}".encode()).hexdigest()
+    return set(sorted(row_ids, key=key)[:n])
+
+
+def ratio_projection(
+    real: np.ndarray, local: np.ndarray, local_total: float
+) -> tuple[float, float]:
+    """Ratio estimator real/local over sampled rows -> (projected total, 99% upper bound)."""
+    ratio = real.sum() / local.sum()
+    rng = np.random.default_rng(BOOT_SEED)
+    n = len(real)
+    idx = rng.integers(0, n, size=(BOOT_RESAMPLES, n))
+    boot = real[idx].sum(axis=1) / local[idx].sum(axis=1)
+    projected = float(ratio * local_total)
+    return projected, max(projected, float(np.percentile(boot, 99) * local_total))
+
+
+def projected_tokens(record: dict) -> tuple[float, float]:
+    """(projected, p99) input tokens; the old format (counts only) is an exact sum."""
+    if "projected_input_tokens" not in record:
+        exact = float(sum(record["counts"].values()))
+        return exact, exact
+    projected = float(record["projected_input_tokens"])
+    return projected, float(record.get("projected_input_tokens_p99", projected))
+
+
+def stage_count(args: argparse.Namespace) -> None:
     import anthropic
 
     pilot, _m = load_pilot()
     items, _stats = build_items(pilot)
+    sample = getattr(args, "sample", None)
+    if sample is None:
+        sample = RUNS[RUN]["default_sample"]
+    keep = count_sample_ids([str(i) for i in pilot["id"]], sample)
+    todo = [i for i in items if row_key(i.custom_id) in keep]
     client = anthropic.Anthropic()
     counts = {}
-    for k, item in enumerate(items):
+    for k, item in enumerate(todo):
         p = build_params(item)
         r = client.messages.count_tokens(
             model=p["model"],
@@ -199,46 +331,127 @@ def stage_count(_: argparse.Namespace) -> None:
         )
         counts[item.custom_id] = r.input_tokens
         if (k + 1) % 100 == 0:
-            print(f"counted {k + 1}/{len(items)}")
+            print(f"counted {k + 1}/{len(todo)}")
+    local = {i.custom_id: local_tokens(i) for i in items}
+    local_total = float(sum(local.values()))
+    sampled = len(todo) < len(items)
+    if sampled:
+        rows = sorted({row_key(c) for c in counts})
+        real = np.array([counts[f"{r}-ab"] + counts[f"{r}-ba"] for r in rows], dtype=float)
+        loc = np.array([local[f"{r}-ab"] + local[f"{r}-ba"] for r in rows], dtype=float)
+        projected, p99 = ratio_projection(real, loc, local_total)
+    else:
+        projected = p99 = float(sum(counts.values()))
     WORK.mkdir(parents=True, exist_ok=True)
-    record = {"requests_sha256": requests_sha256(items), "counts": counts}
+    record = {
+        "requests_sha256": requests_sha256(items),
+        "sampled": sampled,
+        "n_counted": len(counts),
+        "counts": counts,
+        "projected_input_tokens": projected,
+        "projected_input_tokens_p99": p99,
+    }
     (WORK / "token_counts.json").write_text(json.dumps(record) + "\n")
-    total = sum(counts.values())
     v = np.array(list(counts.values()))
-    print(f"input tokens {total:,} (per call median {np.median(v):.0f}, max {v.max()})")
+    kind = f"ratio-projected from {len(counts)} counted" if sampled else "exact"
+    print(f"input tokens {projected:,.0f} ({kind}); 99% upper bound {p99:,.0f}")
     print(
-        f"estimated cost ${estimate_usd(total, len(items)):.4f} (output {EST_OUTPUT_TOKENS}/call)"
+        f"per counted call median {np.median(v):.0f}, max {v.max()}; local total {local_total:,.0f}"
     )
+    print(f"estimated cost ${estimate_usd(p99, len(items)):.4f} at the 99% bound")
+
+
+def load_batches(requests_digest: str | None) -> dict:
+    """State of the run's batches: {"chunks": {k: id}, "n_chunks", "requests_sha256"}."""
+    state_file = WORK / "batches.json"
+    if state_file.exists():
+        return json.loads(state_file.read_text())
+    legacy = WORK / "batch_id.txt"  # the pilot's single batch, before chunking existed
+    if legacy.exists():
+        return {
+            "chunks": {"0": legacy.read_text().strip()},
+            "n_chunks": 1,
+            "requests_sha256": requests_digest,
+        }
+    return {"chunks": {}, "n_chunks": 0, "requests_sha256": requests_digest}
+
+
+def save_batches(state: dict) -> None:
+    tmp = WORK / "batches.json.tmp"
+    tmp.write_text(json.dumps(state, indent=2) + "\n")
+    tmp.replace(WORK / "batches.json")
+
+
+def check_gate(estimate: float, spent: float, ceiling: float | None) -> None:
+    if ceiling is not None and estimate > ceiling:
+        raise SystemExit(
+            f"estimate ${estimate:.4f} exceeds this run's ceiling ${ceiling}; stopping"
+        )
+    if spent + estimate > JUDGE_ALLOTMENT_USD:
+        raise SystemExit(
+            f"spent ${spent:.4f} + estimate ${estimate:.4f} exceeds the judge allotment "
+            f"${JUDGE_ALLOTMENT_USD}; stopping"
+        )
 
 
 def stage_submit(args: argparse.Namespace) -> None:
     require_clean()
-    batch_file = WORK / "batch_id.txt"
-    lock = WORK / "submit.lock"
-    if batch_file.exists():
-        raise SystemExit(f"already submitted: {batch_file.read_text().strip()}")
-    if lock.exists():
-        raise SystemExit(f"{lock} exists without a batch id: check the Console before resubmitting")
+    leftover = sorted(WORK.glob("submit*.lock"))
+    if leftover:
+        raise SystemExit(
+            f"{leftover[0]} exists without a batch id (chunk {leftover[0].stem.split('-')[-1]}): "
+            "check the Console before resubmitting"
+        )
     counts_file = WORK / "token_counts.json"
     if not counts_file.exists():
         raise SystemExit("run `count` first")
     pilot, _m = load_pilot()
     items, _stats = build_items(pilot)
     record = json.loads(counts_file.read_text())
-    if record["requests_sha256"] != requests_sha256(items):
+    digest = requests_sha256(items)
+    if record["requests_sha256"] != digest:
         raise SystemExit("token counts do not match the current requests; re-run `count`")
-    est = estimate_usd(sum(record["counts"].values()), len(items))
+    chunks = chunk_items(items)
+    state = load_batches(digest)
+    if state["chunks"] and state["requests_sha256"] not in (digest, None):
+        raise SystemExit("batches.json was written for different requests; investigate")
+    if (
+        state["chunks"]
+        and state["n_chunks"] != len(chunks)
+        and not (WORK / "batch_id.txt").exists()
+    ):
+        raise SystemExit("batches.json has a different chunk count; investigate")
+    state.update(n_chunks=len(chunks), requests_sha256=digest)
+    pending = [k for k in range(len(chunks)) if str(k) not in state["chunks"]]
+    if not pending:
+        print(f"already submitted: {len(state['chunks'])} batches")
+        return
+
+    _projected, p99 = projected_tokens(record)
+    est = estimate_usd(p99, len(items))
     spent = sum(r.get("cost_usd", 0) for r in ledger_rows())
-    print(f"estimate ${est:.4f}; ledger spend so far ${spent:.4f} of ${JUDGE_ALLOTMENT_USD}")
-    if est > PILOT_CEILING_USD or spent + est > JUDGE_ALLOTMENT_USD:
-        raise SystemExit("estimate exceeds the pilot ceiling or the judge allotment; stopping")
+    print(
+        f"{len(pending)} of {len(chunks)} chunks to submit; estimate ${est:.4f} "
+        f"(99% input bound {p99:,.0f} tokens); ledger spend ${spent:.4f}; "
+        f"remaining allotment ${JUDGE_ALLOTMENT_USD - spent:.4f}"
+    )
+    check_gate(est, spent, RUNS[RUN]["ceiling_usd"])
+    for k in pending:
+        size = chunk_bytes(chunks[k])
+        if size > MAX_CHUNK_BYTES:
+            raise SystemExit(f"chunk {k} is {size:,} bytes, over the {MAX_CHUNK_BYTES:,} limit")
     if not args.yes:
         raise SystemExit("dry run: pass --yes to submit")
-    lock.write_text(datetime.now(UTC).isoformat() + "\n")  # left behind if create dies mid-way
-    batch_id = HaikuBatchJudge().submit(items)
-    batch_file.write_text(batch_id + "\n")
-    lock.unlink()
-    print(f"submitted {batch_id}")
+    judge = HaikuBatchJudge()
+    WORK.mkdir(parents=True, exist_ok=True)
+    for k in pending:
+        lock = WORK / f"submit-{k}.lock"
+        lock.write_text(datetime.now(UTC).isoformat() + "\n")  # left behind if create dies
+        batch_id = judge.submit(chunks[k])
+        state["chunks"][str(k)] = batch_id
+        save_batches(state)
+        lock.unlink()
+        print(f"submitted chunk {k}/{len(chunks)}: {batch_id}")
 
 
 def lgbm_reference(pilot: pd.DataFrame, loss_judge: np.ndarray) -> dict | None:
@@ -255,16 +468,36 @@ def lgbm_reference(pilot: pd.DataFrame, loss_judge: np.ndarray) -> dict | None:
     }
 
 
+def raw_path(k: int) -> Path:
+    """Chunk k's saved results; the pilot's single chunk keeps its original file name."""
+    return WORK / ("results.jsonl" if RUN == "pilot-500" and k == 0 else f"results-{k}.jsonl")
+
+
+def batch_ids_of(row: dict) -> list[str]:
+    return sorted(row.get("batch_ids") or ([row["batch_id"]] if row.get("batch_id") else []))
+
+
 def stage_collect(_: argparse.Namespace) -> None:
     sha = require_clean()
-    batch_id = (WORK / "batch_id.txt").read_text().strip()
-    raw_file = WORK / "results.jsonl"
-    if not raw_file.exists():
-        judge = HaikuBatchJudge()
-        judge.wait(batch_id)
-        raw = judge.collect(batch_id)
-        raw_file.write_text("".join(json.dumps(r) + "\n" for r in raw))
-    raw = [json.loads(line) for line in raw_file.read_text().splitlines()]
+    state = load_batches(None)
+    n_chunks = state["n_chunks"]
+    if not n_chunks or len(state["chunks"]) != n_chunks:
+        raise SystemExit(
+            f"only {len(state['chunks'])} of {n_chunks} chunks are submitted; run `submit` first"
+        )
+    batch_ids = sorted(state["chunks"].values())
+    judge = None
+    raw: list[dict] = []
+    for k in range(n_chunks):
+        path = raw_path(k)
+        if not path.exists():
+            judge = judge or HaikuBatchJudge()
+            judge.wait(state["chunks"][str(k)])
+            rows = judge.collect(state["chunks"][str(k)])
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            tmp.replace(path)
+        raw.extend(json.loads(line) for line in path.read_text().splitlines())
     outputs = [parse_result(r) for r in raw]
 
     pilot, manifest = load_pilot()
@@ -272,14 +505,17 @@ def stage_collect(_: argparse.Namespace) -> None:
     prior = prior_by_fold(manifest, labels, pilot["fold"].to_numpy(dtype=int))
     summary, P_cal = score(pilot, prior, outputs)
     _items, summary["truncation"] = build_items(pilot)
-    summary["batch_id"] = batch_id
+    summary["batch_ids"] = batch_ids
+    summary["n_chunks"] = n_chunks
+    if n_chunks == 1:
+        summary["batch_id"] = batch_ids[0]
     summary["lgbm_reference"] = lgbm_reference(pilot, row_losses(pilot["y"].to_numpy(), P_cal))
     SUMMARY.write_text(json.dumps(summary, indent=2) + "\n")
-    if any(r.get("batch_id") == batch_id for r in ledger_rows()):
-        print(f"ledger already has batch {batch_id}; summary rewritten, no new row")
+    if any(batch_ids_of(r) == batch_ids for r in ledger_rows()):
+        print(f"ledger already has batches {batch_ids}; summary rewritten, no new row")
         return
     cost, ci, loss = summary["cost_usd"], summary["gain_vs_prior"], summary["log_loss"]
-    _write_ledger(sha, pilot, P_cal, batch_id, cost, ci, loss["matrix_cv"], summary)
+    _write_ledger(sha, pilot, P_cal, batch_ids, cost, ci, loss["matrix_cv"], summary)
 
 
 def score(pilot: pd.DataFrame, prior: np.ndarray, outputs: list) -> tuple[dict, np.ndarray]:
@@ -305,7 +541,7 @@ def score(pilot: pd.DataFrame, prior: np.ndarray, outputs: list) -> tuple[dict, 
     agree = [o.winner == ("A", "B", "tie")[int(np.argmax([o.p_a, o.p_b, o.p_tie]))] for o in ok]
 
     summary = {
-        "run": "pilot-500",
+        "run": RUN,
         "n_rows": len(pilot),
         "n_calls": len(outputs),
         "status_counts": status_counts(outputs),
@@ -341,9 +577,9 @@ def score(pilot: pd.DataFrame, prior: np.ndarray, outputs: list) -> tuple[dict, 
     return summary, P_cal
 
 
-def _write_ledger(sha, pilot, P_cal, batch_id, cost, ci, loss_cal, summary) -> None:
+def _write_ledger(sha, pilot, P_cal, batch_ids, cost, ci, loss_cal, summary) -> None:
     ts = datetime.now(UTC)
-    run_id = f"{ts.strftime('%Y%m%dT%H%M%S')}-haiku-pilot"
+    run_id = f"{ts.strftime('%Y%m%dT%H%M%S')}-{RUNS[RUN]['id_tag']}"
     PRED_DIR.mkdir(parents=True, exist_ok=True)
     pred_path = PRED_DIR / f"{run_id}.parquet"
     pd.DataFrame(
@@ -360,8 +596,8 @@ def _write_ledger(sha, pilot, P_cal, batch_id, cost, ci, loss_cal, summary) -> N
         "git_sha": sha,
         "config_hash": config_hash(),
         "model": MODEL,
-        "config": "haiku_pilot_500",
-        "split": "cv-pilot",
+        "config": RUNS[RUN]["ledger_config"],
+        "split": RUNS[RUN]["split_tag"],
         "log_loss": loss_cal,
         "cost_usd": cost,
         "predictions_path": str(pred_path),
@@ -369,8 +605,10 @@ def _write_ledger(sha, pilot, P_cal, batch_id, cost, ci, loss_cal, summary) -> N
         "n_rows": len(pilot),
         "ci95_vs_prior": [ci["lo"], ci["hi"]],
         "refusal_rate": summary["refusal_rate"],
-        "batch_id": batch_id,
+        "batch_ids": batch_ids,
     }
+    if len(batch_ids) == 1:
+        row["batch_id"] = batch_ids[0]
     with LEDGER.open("a") as fh:
         fh.write(json.dumps(row) + "\n")
     print(json.dumps({k: summary[k] for k in ("log_loss", "gain_vs_prior", "gate_pass")}, indent=2))
@@ -388,8 +626,11 @@ STAGES = {
 def main(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("stage", choices=list(STAGES))
+    parser.add_argument("--run", choices=list(RUNS), default="pilot-500")
+    parser.add_argument("--sample", type=int, default=None, help="count: rows to count_tokens")
     parser.add_argument("--yes", action="store_true", help="actually submit the paid batch")
     args = parser.parse_args(argv)
+    select_run(args.run)
     STAGES[args.stage](args)
 
 
