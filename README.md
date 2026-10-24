@@ -44,6 +44,13 @@ columns. Committed predictions hold only `id` and three probabilities.
   limit; `splits/split_manifest.sha256` and `splits/split_counts.json` are committed and a test
   checks the regenerated manifest against the digest when `data/raw` is present.
 
+## Rung 2: features + LightGBM
+
+`make lgbm` (or `make lgbm CONFIGS="full"`) runs 5-fold grouped CV on the cv split with hand-built
+features, a/b swap augmentation and three configurations. Results, bias read-outs and the gate
+verdict are in [`docs/rung-2-features.md`](docs/rung-2-features.md). Out-of-fold predictions go to
+`data/predictions/` (gitignored, over the leak-check size limit); their sha256 is in the ledger.
+
 ## Quickstart
 
 ```

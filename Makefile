@@ -1,4 +1,4 @@
-.PHONY: setup lint format test leak-check ci data data-kaggle split profile
+.PHONY: setup lint format test leak-check ci data data-kaggle split profile lgbm
 
 setup:
 	uv sync --group dev
@@ -33,3 +33,6 @@ split:
 
 profile:
 	uv run python scripts/make_profile.py
+
+lgbm:
+	uv run python scripts/run_lgbm.py $(CONFIGS)
