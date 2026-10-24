@@ -93,9 +93,28 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def locate_train_csv(data_dir: Path, expect_sha: str) -> Path:
+    """data_dir/train.csv, else the train.csv under data_dir's parent whose sha256 matches.
+
+    Kaggle's competition mount point has moved between images, so the hash decides, not the path.
+    """
+    direct = data_dir / "train.csv"
+    if direct.is_file():
+        return direct
+    candidates = sorted(data_dir.parent.rglob("train.csv"))
+    for path in candidates:
+        if sha256_file(path) == expect_sha:
+            print(f"found train.csv at {path} (searched under {data_dir.parent})", flush=True)
+            return path
+    raise SystemExit(
+        f"no train.csv with sha256 {expect_sha} under {data_dir.parent}; candidates: "
+        f"{[str(c) for c in candidates]}"
+    )
+
+
 def load_verified(data_dir: Path, expect_sha: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Hash train.csv, build the manifest on the full file and check its digest. Never test.csv."""
-    path = data_dir / "train.csv"
+    path = locate_train_csv(data_dir, expect_sha)
     got = sha256_file(path)
     if got != expect_sha:
         raise SystemExit(f"train.csv sha256 {got} != expected {expect_sha}")
