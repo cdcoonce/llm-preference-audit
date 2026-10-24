@@ -208,3 +208,17 @@ def test_constructor_makes_no_client():
     j = HaikuBatchJudge()
     assert j._client is None and j.name and j.model == MODEL
     assert math.isfinite(j.poll_seconds)
+
+
+RECORDED = Path(__file__).parent / "fixtures" / "haiku_batch_results_recorded.jsonl"
+
+
+def test_recorded_pilot_responses_parse_ok():
+    """Real Batch API results from the 2026-10-24 pilot (ids renamed; JSON answers only)."""
+    rows = [json.loads(line) for line in RECORDED.read_text().splitlines() if line]
+    assert len(rows) == 6
+    for raw in rows:
+        MessageBatchIndividualResponse.model_validate(raw)
+        out = parse_result(raw)
+        assert out.status == "ok" and out.input_tokens > 0 and out.output_tokens > 0
+        assert math.isclose(out.p_a + out.p_b + out.p_tie, 1.0)
