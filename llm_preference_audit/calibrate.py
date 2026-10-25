@@ -61,6 +61,18 @@ class MatrixScaler:
         return self._lr.predict_proba(log_features(P))
 
 
+def export_calibrator(scaler: MatrixScaler) -> dict:
+    """JSON-ready coefficients of a fitted MatrixScaler, for `submission.apply_calibrator`."""
+    lr = scaler._lr
+    return {
+        "kind": "matrix_scaling",
+        "prob_floor": PROB_FLOOR,
+        "classes": [int(c) for c in lr.classes_],
+        "coef": np.asarray(lr.coef_, dtype=float).tolist(),
+        "intercept": np.asarray(lr.intercept_, dtype=float).tolist(),
+    }
+
+
 def assert_cv_rows(splits) -> None:
     """Raise if any row is not a cv (training-fold) row."""
     bad = int((np.asarray(splits) != "cv").sum())
