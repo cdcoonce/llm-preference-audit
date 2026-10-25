@@ -35,6 +35,39 @@ uv run --with torch --with transformers --with peft --with sentencepiece --with 
 The tiny path downloads the open Qwen2.5 tokenizer (Gemma's is gated). Add `--dry` to
 `modal run` to see the spend-guard verdict without uploading or launching anything.
 
+## Prefetch, deadlines, and what the guard enforces
+
+* **Weights are prefetched on CPU.** Before the first launch the entrypoint runs `prefetch()` (no GPU,
+  needs the `huggingface` secret) if `/vol/hf-cache/.prefetched/gemma-2-9b-it` is absent, and records
+  it in the spend file as CPU spend at $0.20/h x the 30 min timeout = $0.10 (Modal lists $0.0000131
+  per core-s and $0.00000222 per GiB-s; 2 cores + 8 GiB is about $0.16/h, modal.com/pricing,
+  2026-10-25). GPU functions run with `HF_HUB_OFFLINE=1` and `--local-files-only` and never see
+  `HF_TOKEN`; a missing cache fails before any model load.
+* **Time limits come from the budget.** `deadline_s = min(6 h, remaining_approved x 3600 / 3.95 /
+  n_jobs) - 10 min`, where remaining_approved is the approved amount (or $85, whichever binds) minus
+  recorded spend; a probe is also capped at $5. The launch is refused if that is shorter than the
+  job's need (probe projection x 1.15; 20 min without a projection). The same number is passed as the
+  Modal timeout (`Function.with_options(timeout=deadline+10 min)`, per launch) and as `--deadline-s`
+  (an in-process wall clock: training and inference stop cleanly, the log gets `error="deadline"`,
+  `probe.json` is rewritten after start, setup, the attention check, training and inference).
+  The worst case recorded at launch is timeout x price x jobs.
+* **Spend is charged at the worst case until reconciled** (max of estimate and worst case). The
+  automatic reconcile charges each job its log's `est_cost_usd` x 1.15 (at most its worst case), or its
+  full worst case when it left no log, and never less than min(estimate, worst case). Only
+  `reconcile --job-id J --actual-usd X --source modal-dashboard` can lower it; it records the source
+  and the previous value, and the spend file is append-only. Folds 1-4 launched together are charged
+  their whole remaining-budget worst case, so `full` waits until they are reconciled.
+* **One launch at a time.** `data/lora_out/launch.lock` (O_CREAT|O_EXCL) is held from the guard check
+  through `record_launch`. A leftover lock refuses; read it and remove it by hand.
+* **A tag is single-use locally**: the launch refuses if `data/lora_out/<tag>/` already holds this
+  launch's log or probe file (the automatic reconcile would read an old run's cost). In the container
+  each run deletes its own stale `oof_fold{k}.parquet`/log (and a full run its adapter files) first.
+* **Preemption.** Functions use `retries=0`. Modal's preemption guide says a preempted input is
+  restarted on the same input and does not say whether that counts against retries;
+  `nonpreemptible` is not supported for GPU functions. A preemption can therefore re-bill an input
+  beyond the one-attempt worst case: check the dashboard after every launch.
+* `--mode fetch` needs no `LORA_SHA` (the GPU functions and image only exist when it is set).
+
 ## G0: probe (at most $5; one-hour function timeout = $3.95)
 
 ```sh
@@ -42,9 +75,11 @@ modal run lora/modal_app.py --mode probe --tag probe --sha $LORA_SHA --yes
 ```
 
 Writes `data/lora_out/probe/probe.json`: throughput, peak memory, the eager-vs-sdpa decision, and the
-cost projection (fold, 5 folds, all-cv adapter, plus the 15% overhead line). G0 passes when the loss is
-finite, memory fits, the attention check is decided, and `projection.total_usd_with_overhead` is at
-most $70. Later launches read the newest `data/lora_out/*/probe.json` for `--attn auto`.
+cost projection (fold, 5 folds, all-cv adapter, plus the 15% overhead line). **G0 is machine-enforced**:
+any fold or full launch needs a complete probe for the SAME git sha (not tiny, google/gemma-2-9b-it,
+T=2048, loss finite, `non_finite_loss` null, an attention decision, and
+`projection.total_usd_with_overhead` <= $70). The probe is chosen by sha and realness, never by mtime
+or tag, and drives `--attn auto`. Any code change needs a new probe.
 If memory is tight, lower `--micro-batch` (must divide 16; throughput and projection change).
 
 ## G1: fold 0 (one container)
@@ -55,7 +90,11 @@ uv run python lora/spend_guard.py g1 --oof data/lora_out/g1/oof_fold0.parquet \
   --probe data/lora_out/probe/probe.json        # writes data/lora_out/g1_decision.json
 ```
 
-`pass` means swap-averaged raw fold-0 log loss <= 1.00 (1.0001 fails). Between 1.00 and 1.0425
+`pass` means swap-averaged raw fold-0 log loss <= 1.00 (1.0001 fails). The decision records the
+fold-0 log's git sha and tag, the OOF file's sha256 and the verified train.csv sha256 (the CLI
+refuses a raw file whose hash is not `TRAIN_SHA256`, and a fold log that errored). Folds 1-4 and `full`
+re-score that exact OOF file at launch (hash must match, loss recomputed) and need the launch's sha to
+equal the decision's. Between 1.00 and 1.0425
 stop and report; above 1.0425 debug one round (`--lr` is not a CLI flag of the launcher: change
 `LR` in `lora_train.py`, commit, push, rebuild).
 
@@ -95,10 +134,10 @@ file and the ledger rung-6 total, never both).
 * Every launch appends its estimate to `data/lora_out/spend.jsonl` BEFORE launching; afterwards the
   entrypoint appends a reconcile line (`est_cost_usd` in the logs x 1.15 for container boot).
   Replace it with the Modal dashboard figure: `python lora/spend_guard.py reconcile --job-id <id>
-  --actual-usd <dollars>`. `python lora/spend_guard.py status` prints totals.
+  --actual-usd <dollars> --source modal-dashboard`. `python lora/spend_guard.py status` prints totals.
 * `est_cost_usd` in each log = wall seconds x $3.95/3600 (H100 list price, modal.com/pricing,
   2026-10-25). Container boot and image pull are not in it.
-* A stuck fold is bounded only by its function timeout (6 h = $23.70; override with
-  `LORA_TIMEOUT_S=7200`). Check `modal app list` if a launch dies mid-way.
+* A stuck job is bounded by its budget-derived Modal timeout (see above), not a fixed 6 h. Check
+  `modal app list` if a launch dies mid-way.
 * Per-fold config is verified against the launcher's request inside the container
   (`check_worker_config`). Folds re-encode the 51,848 cv rows (a few CPU minutes, billed).

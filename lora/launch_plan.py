@@ -6,7 +6,6 @@ inside the container, which only ships the pinned package).
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 from pathlib import Path
@@ -62,9 +61,23 @@ def parse_folds(folds: str) -> list[int]:
     return out
 
 
-def latest_probe(root: Path = OUT_ROOT) -> dict | None:
-    files = sorted(Path(root).glob("*/probe.json"), key=lambda p: p.stat().st_mtime)
-    return json.loads(files[-1].read_text()) if files else None
+def latest_probe(root: Path = OUT_ROOT, git_sha: str = "") -> dict | None:
+    """The real probe for `git_sha` (see spend_guard.select_probe), never chosen by mtime."""
+    import spend_guard
+
+    return spend_guard.select_probe(Path(root), git_sha) if git_sha else None
+
+
+def refuse_stale_outputs(out_dir: Path, mode: str, folds: list[int]) -> None:
+    """A tag whose local output dir already holds this launch's files would let the automatic
+    reconcile read an OLD run's log as this run's cost. Use a new tag (or move the dir)."""
+    out = Path(out_dir)
+    names = {"probe": ["probe.json"], "full": ["log_full.json"]}.get(
+        mode, [f"log_fold{k}.json" for k in folds]
+    )
+    old = [n for n in names if (out / n).exists()]
+    if old:
+        raise SystemExit(f"refusing: {out} already has {old} from an earlier run; use a new --tag")
 
 
 def resolve_attn(attn: str, probe: dict | None) -> str:

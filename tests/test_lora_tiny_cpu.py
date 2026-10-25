@@ -77,3 +77,59 @@ def test_best_state_roundtrip_touches_only_trainable_params():
             assert torch.equal(p.cpu(), state[n])
         else:
             assert torch.equal(p, frozen_before[n])
+
+
+# ---- worker config, deadline, stale outputs
+import json
+from pathlib import Path
+
+RAW = Path(__file__).resolve().parents[1] / "data" / "raw"
+
+
+def test_worker_config_mismatch_is_an_exception_modal_reports_not_systemexit(tmp_path):
+    (tmp_path / "log_fold0.json").write_text(json.dumps({"t": 256, "git_sha": "x"}))
+    lt.check_worker_config(tmp_path, 0, {"t": 256})
+    with pytest.raises(lt.WorkerConfigMismatch):
+        lt.check_worker_config(tmp_path, 0, {"t": 2048})
+    assert not issubclass(lt.WorkerConfigMismatch, SystemExit)
+
+
+def _tiny_args(tmp_path, mode, *extra):
+    return [
+        "--mode", mode, "--tiny", "--max-rows", "60", "--t", "128", "--probe-steps", "2",
+        "--probe-infer-rows", "8", "--attn-rows", "8", "--data-dir", str(RAW),
+        "--out-dir", str(tmp_path / "out"), "--adapter-dir", str(tmp_path / "adapter"),
+        "--git-sha", "abc", "--tag", "t", *extra,
+    ]  # fmt: skip
+
+
+@pytest.fixture
+def tiny_ready():
+    if not (RAW / "train.csv").exists():
+        pytest.skip("data/raw/train.csv not present")
+    try:
+        from transformers import AutoTokenizer
+
+        AutoTokenizer.from_pretrained(lt.TINY_TOKENIZER)
+    except Exception:  # noqa: BLE001  offline
+        pytest.skip("tiny tokenizer not available")
+
+
+def test_probe_with_an_expired_deadline_leaves_partial_evidence(tmp_path, tiny_ready):
+    code = lt.main(_tiny_args(tmp_path, "probe", "--deadline-s", "0.001"))
+    assert code == lt.DEADLINE_EXIT
+    probe = json.loads((tmp_path / "out" / "probe.json").read_text())
+    assert probe["error"] == "deadline" and probe["complete"] is False
+    assert probe["git_sha"] == "abc" and probe["tiny"] is True and "est_cost_usd" in probe
+
+
+def test_fold_deadline_logs_error_and_deletes_the_stale_oof(tmp_path, tiny_ready):
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "oof_fold0.parquet").write_text("stale from another sha")
+    (out / "log_fold0.json").write_text('{"git_sha": "other"}')
+    code = lt.main(_tiny_args(tmp_path, "fold", "--fold", "0", "--deadline-s", "0.001"))
+    assert code == lt.DEADLINE_EXIT
+    log = json.loads((out / "log_fold0.json").read_text())
+    assert log["error"] == "deadline" and log["git_sha"] == "abc"
+    assert not (out / "oof_fold0.parquet").exists()

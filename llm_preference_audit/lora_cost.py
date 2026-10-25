@@ -59,3 +59,64 @@ def project(
         "g0_total_cap_usd": G0_TOTAL_CAP_USD,
         "meets_g0_total_cap": total <= G0_TOTAL_CAP_USD,
     }
+
+
+# ---------------------------------------------------------------- in-process deadline
+
+
+class DeadlineExceeded(RuntimeError):
+    """The in-process wall-clock budget ran out; the job stops cleanly and logs error="deadline"."""
+
+    def __init__(self, stage: str):
+        super().__init__(f"deadline reached during {stage}")
+        self.stage = stage
+
+
+class Deadline:
+    """A wall-clock budget in seconds from construction. `seconds` of None or 0 means no limit."""
+
+    def __init__(self, seconds: float | None, clock=None):
+        import time
+
+        self._clock = clock or time.monotonic
+        self.seconds = float(seconds) if seconds else None
+        self._t0 = self._clock()
+
+    def remaining(self) -> float:
+        return float("inf") if self.seconds is None else self.seconds - (self._clock() - self._t0)
+
+    def expired(self) -> bool:
+        return self.remaining() <= 0
+
+    def check(self, stage: str) -> None:
+        if self.expired():
+            raise DeadlineExceeded(stage)
+
+
+# ---------------------------------------------------------------- stale outputs
+
+
+def stale_outputs(mode: str, out_dir, adapter_dir, fold: int | None = None) -> list:
+    """Files a previous run under the same tag may have left that this run will (re)produce."""
+    from pathlib import Path
+
+    out, adapter = Path(out_dir), Path(adapter_dir)
+    if mode == "probe":
+        return [out / "probe.json"]
+    if mode == "fold":
+        return [out / f"oof_fold{fold}.parquet", out / f"log_fold{fold}.json"]
+    if mode == "full":
+        names = ("adapter_model.safetensors", "adapter_config.json", "adapter_meta.json")
+        return [out / "log_full.json", *(adapter / n for n in names)]
+    return []
+
+
+def clear_stale_outputs(mode: str, out_dir, adapter_dir, fold: int | None = None) -> list:
+    """Delete them at the start of a run, so no file in the volume can outlive the code that
+    produced it (a failed run then leaves a log, never an older run's OOF)."""
+    removed = []
+    for p in stale_outputs(mode, out_dir, adapter_dir, fold):
+        if p.exists():
+            p.unlink()
+            removed.append(p)
+    return removed

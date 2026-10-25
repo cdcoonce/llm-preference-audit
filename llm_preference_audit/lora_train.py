@@ -39,6 +39,7 @@ import torch
 import transformers
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
+from llm_preference_audit.cv_common import assert_cv_only
 from llm_preference_audit.deberta_inputs import (
     assert_no_text,
     fold_plan,
@@ -48,10 +49,16 @@ from llm_preference_audit.deberta_inputs import (
     swap_example,
 )
 from llm_preference_audit.kernel_common import GIB, TRAIN_SHA256, load_verified
-from llm_preference_audit.lora_cost import PRICE_PER_HOUR, est_cost_usd, project
+from llm_preference_audit.lora_cost import (
+    PRICE_PER_HOUR,
+    Deadline,
+    DeadlineExceeded,
+    clear_stale_outputs,
+    est_cost_usd,
+    project,
+)
 from llm_preference_audit.lora_inputs import Template, build_lora_ids, field_window, make_template
 from llm_preference_audit.scoring import log_loss
-from llm_preference_audit.train_lgbm import assert_cv_only
 from llm_preference_audit.truncate import MIDDLE_SHARE
 
 EFFECTIVE_BATCH = 16
@@ -74,6 +81,20 @@ class NonFiniteLoss(RuntimeError):
     pass
 
 
+class WorkerConfigMismatch(RuntimeError):
+    """A worker's log records a different config than the launcher asked for."""
+
+
+DEADLINE_EXIT = 4
+
+
+def tick(args, stage: str) -> None:
+    """Stop cleanly (DeadlineExceeded) once the in-process wall-clock budget is spent."""
+    deadline = getattr(args, "deadline", None)
+    if deadline is not None:
+        deadline.check(stage)
+
+
 class Encoded(NamedTuple):
     meta: pd.DataFrame  # id, y, fold, group, hard_cut, both_untruncated, n_* (no text)
     p: list
@@ -87,7 +108,10 @@ class Encoded(NamedTuple):
 
 
 def make_tokenizer(args):
-    tok = AutoTokenizer.from_pretrained(TINY_TOKENIZER if args.tiny else args.model)
+    tok = AutoTokenizer.from_pretrained(
+        TINY_TOKENIZER if args.tiny else args.model,
+        local_files_only=bool(getattr(args, "local_files_only", False)) and not args.tiny,
+    )
     tok.model_max_length = 10**9  # we fit to the window ourselves
     if tok.pad_token_id is None:
         raise SystemExit("tokenizer has no pad token")
@@ -197,6 +221,7 @@ def load_base(args, tok, attn: str):
             dtype=torch.bfloat16,
             attn_implementation=attn,
             pad_token_id=tok.pad_token_id,
+            local_files_only=bool(getattr(args, "local_files_only", False)),
         )
     model.config.pad_token_id = tok.pad_token_id
     model.config.use_cache = False
@@ -263,6 +288,7 @@ def predict(model, enc, idx, swap, tok, template, args, device) -> tuple[np.ndar
     out = np.zeros((len(seqs), 3), dtype=np.float64)
     tokens = 0
     for s in range(0, len(order), args.infer_batch):
+        tick(args, "inference")
         sel = order[s : s + args.infer_batch]
         ids, mask = collate([seqs[j] for j in sel], tok.pad_token_id, device)
         with autocast(device):
@@ -343,6 +369,7 @@ def train(model, enc, template, train_idx, eval_idx, tok, args, seed, device, ma
     for group in groups:
         t_step = time.perf_counter()
         for bidx in group:
+            tick(args, "train")
             pairs = [
                 make_seq(enc, int(train_idx[j]), bool(swaps[j]), template, args.t) for j in bidx
             ]
@@ -438,6 +465,7 @@ def base_log(args, device, attn: str, template: Template) -> dict:
         "dtype": "base bf16; LoRA+head fp32 masters; bf16 autocast",
         "template_overhead": template.overhead,
         "price_per_hour": PRICE_PER_HOUR,
+        "deadline_s": getattr(args, "deadline_s", 0.0) or None,
         "gpu_name": gpu_name(device),
         "torch": torch.__version__,
         "transformers": transformers.__version__,
@@ -492,6 +520,7 @@ def attention_check(model, enc, tok, template, args, device, n_rows: int) -> dic
         model.set_attn_implementation(impl)
         logits = np.zeros((len(seqs), 3), dtype=np.float64)
         for s in range(0, len(order), args.infer_batch):
+            tick(args, "attention")
             sel = order[s : s + args.infer_batch]
             ids, mask = collate([seqs[j] for j in sel], tok.pad_token_id, device)
             with autocast(device):
@@ -514,16 +543,47 @@ def attention_check(model, enc, tok, template, args, device, n_rows: int) -> dic
 # ---------------------------------------------------------------- probe
 
 
+def write_probe(out: Path, probe: dict, t_run: float, complete: bool = False) -> None:
+    """Rewrite probe.json from what is known so far, so a killed job still leaves evidence."""
+    probe["complete"] = complete
+    probe["finished_at"] = time.time()
+    probe["wall_seconds"] = time.time() - t_run
+    probe["est_cost_usd"] = est_cost_usd(probe["wall_seconds"])
+    (out / "probe.json").write_text(json.dumps(probe, indent=2) + "\n")
+
+
 def run_probe(args) -> int:
     t_run = time.time()
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    clear_stale_outputs("probe", out, args.adapter_dir)
     device = pick_device()
     seed = SEED_BASE
+    probe = {"mode": "probe", "tiny": args.tiny, "seed": seed} | expected_config(args)
+    probe["deadline_s"] = getattr(args, "deadline_s", 0.0) or None
+    write_probe(out, probe, t_run)  # evidence even if the job dies in data prep
+    try:
+        _probe_body(args, out, device, seed, probe, t_run)
+    except DeadlineExceeded as e:
+        probe |= {"error": "deadline", "deadline_stage": e.stage}
+        print(f"[probe] deadline reached during {e.stage}", flush=True)
+        write_probe(out, probe, t_run)
+        return DEADLINE_EXIT
+    except Exception as e:  # noqa: BLE001  recorded, then the failure is visible in the exit code
+        probe["error"] = f"{type(e).__name__}: {e}"
+        print(f"[probe] FAILED: {probe['error']}", flush=True)
+        write_probe(out, probe, t_run)
+        return 3
+    print(json.dumps(probe, indent=2))
+    return 0
+
+
+def _probe_body(args, out: Path, device, seed: int, probe: dict, t_run: float) -> None:
     set_seeds(seed)
     t0 = time.time()
     tok, template, manifest, enc = setup(args)
     data_s = time.time() - t0
+    tick(args, "setup")
     meta = enc.meta
     plan = fold_plan(meta, 0, manifest)
     train_idx, pred_idx = positions(meta, plan["train_ids"]), positions(meta, plan["predict_ids"])
@@ -536,16 +596,19 @@ def run_probe(args) -> int:
     t0 = time.time()
     model = load_base(args, tok, "eager").to(device)
     load_s = time.time() - t0
-    probe = {"mode": "probe", "tiny": args.tiny, "seed": seed} | enc.shares
+    probe |= enc.shares
     probe |= base_log(args, device, "pending", template)
     probe["model_load_seconds"] = load_s
     probe["data_seconds"] = data_s
+    write_probe(out, probe, t_run)
+    tick(args, "model load")
 
     check = attention_check(model, enc, tok, template, args, device, args.attn_rows)
     probe["attention_check"] = check
     attn = check["choice"] if args.attn == "auto" else args.attn
     probe["attention_decision"] = attn
     probe["attn_implementation"] = attn
+    write_probe(out, probe, t_run)  # after the attention check
     model.set_attn_implementation(attn)
     model = wrap_lora(model, args)
 
@@ -556,6 +619,7 @@ def run_probe(args) -> int:
         probe["non_finite_loss"] = str(e)
         tstats = {}
     probe["train"] = tstats
+    write_probe(out, probe, t_run)  # after training
 
     n_inf = min(args.probe_infer_rows, len(pred_idx))
     inf_idx = rng.choice(pred_idx, size=n_inf, replace=False)
@@ -585,11 +649,7 @@ def run_probe(args) -> int:
             infer_seqs_per_s=seq_per_s,
             load_seconds=load_s,
         )
-    probe["wall_seconds"] = time.time() - t_run
-    probe["est_cost_usd"] = est_cost_usd(probe["wall_seconds"])
-    (out / "probe.json").write_text(json.dumps(probe, indent=2) + "\n")
-    print(json.dumps(probe, indent=2))
-    return 0
+    write_probe(out, probe, t_run, complete=True)  # after inference
 
 
 # ---------------------------------------------------------------- fold / full
@@ -608,6 +668,8 @@ def run_fold(args) -> int:
     out.mkdir(parents=True, exist_ok=True)
     seed = SEED_BASE + fold
     attn = resolve_attn(args)
+    # G1 binds to this run: nothing an earlier run left under this tag may survive into it.
+    clear_stale_outputs("fold", out, args.adapter_dir, fold)
     log = {"mode": "fold", "fold": fold, "seed": seed, "attn_implementation": attn}
     code = 3
     device = pick_device()
@@ -617,6 +679,7 @@ def run_fold(args) -> int:
         tok, template, manifest, enc = setup(args)
         log |= base_log(args, device, attn, template) | enc.shares
         log["data_seconds"] = time.time() - t0
+        tick(args, "setup")
         meta = enc.meta
         plan = fold_plan(meta, fold, manifest)
         log["group_disjoint_checked"] = True
@@ -649,6 +712,13 @@ def run_fold(args) -> int:
         (out / f"log_fold{fold}.json").write_text(json.dumps(log, indent=2) + "\n")
         frame.to_parquet(out / f"oof_fold{fold}.parquet", index=False)  # only after a clean score
         return 0
+    except DeadlineExceeded as e:
+        log |= {"error": "deadline", "deadline_stage": e.stage}
+        print(f"[fold {fold}] deadline reached during {e.stage}", flush=True)
+        log |= {k: v for k, v in expected_config(args).items() if k not in log}
+        finish_log(log, t_run, device)
+        (out / f"log_fold{fold}.json").write_text(json.dumps(log, indent=2) + "\n")
+        return DEADLINE_EXIT
     except Exception as e:  # noqa: BLE001  recorded, never skipped; the fold produces no OOF file
         log["error"] = f"{type(e).__name__}: {e}"
         print(f"[fold {fold}] FAILED: {log['error']}", flush=True)
@@ -664,6 +734,7 @@ def run_full(args) -> int:
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
     attn = resolve_attn(args)
+    clear_stale_outputs("full", out, args.adapter_dir)
     log = {"mode": "full", "seed": FULL_SEED, "attn_implementation": attn}
     device = pick_device()
     try:
@@ -672,6 +743,7 @@ def run_full(args) -> int:
         tok, template, manifest, enc = setup(args)
         log |= base_log(args, device, attn, template) | enc.shares
         log["data_seconds"] = time.time() - t0
+        tick(args, "setup")
         meta = enc.meta
         assert_cv_only(meta["id"].to_numpy(), manifest)
         if "split" in meta.columns and (meta["split"] != "cv").any():
@@ -689,6 +761,11 @@ def run_full(args) -> int:
         (adapter / "adapter_meta.json").write_text(json.dumps(expected_config(args), indent=2))
         log["adapter_dir"] = str(adapter)
         code = 0
+    except DeadlineExceeded as e:
+        log |= {"error": "deadline", "deadline_stage": e.stage}
+        print(f"[full] deadline reached during {e.stage}", flush=True)
+        log |= {k: v for k, v in expected_config(args).items() if k not in log}
+        code = DEADLINE_EXIT
     except Exception as e:  # noqa: BLE001
         log["error"] = f"{type(e).__name__}: {e}"
         print(f"[full] FAILED: {log['error']}", flush=True)
@@ -704,7 +781,7 @@ def check_worker_config(out_dir: Path, fold: int, want: dict) -> None:
     log = json.loads((Path(out_dir) / f"log_fold{fold}.json").read_text())
     got = {k: log.get(k) for k in want}
     if got != want:
-        raise SystemExit(f"fold {fold} ran with {got}, launcher asked for {want}")
+        raise WorkerConfigMismatch(f"fold {fold} ran with {got}, launcher asked for {want}")
 
 
 # ---------------------------------------------------------------- selftest
@@ -772,6 +849,12 @@ def parse(argv=None) -> argparse.Namespace:
     ap.add_argument("--out-dir", required=False, default="/vol/out/run")
     ap.add_argument("--adapter-dir", default="/vol/adapters/run")
     ap.add_argument("--expect-train-sha256", default=TRAIN_SHA256)
+    ap.add_argument("--deadline-s", type=float, default=0.0, help="wall-clock budget; 0 = none")
+    ap.add_argument(
+        "--local-files-only",
+        action="store_true",
+        help="load weights/tokenizer from the HF cache only (fail fast if not prefetched)",
+    )
     ap.add_argument("--tag", default="")
     ap.add_argument("--git-sha", default="")
     return ap.parse_args(argv)
@@ -779,6 +862,7 @@ def parse(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse(argv)
+    args.deadline = Deadline(args.deadline_s)  # starts now: the budget covers data prep and load
     if EFFECTIVE_BATCH % args.micro_batch:
         raise SystemExit("--micro-batch must divide 16")
     if not 0 <= args.fold <= 4:

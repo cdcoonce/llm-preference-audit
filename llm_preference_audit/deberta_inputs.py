@@ -12,8 +12,8 @@ from collections.abc import Callable, Iterable, Sequence
 import numpy as np
 import pandas as pd
 
+from llm_preference_audit.cv_common import TestSplitLeak, assert_cv_only, inner_holdout_mask
 from llm_preference_audit.data import LABELS
-from llm_preference_audit.train_lgbm import TestSplitLeak, assert_cv_only, inner_holdout_mask
 from llm_preference_audit.truncate import MIDDLE_SHARE, both_responses_whole, fit_pair
 
 N_SPECIAL = 4  # [CLS] prompt [SEP] a [SEP] b [SEP]
