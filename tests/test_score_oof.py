@@ -219,3 +219,18 @@ def test_cli_without_ledger_flag_writes_no_row(tmp_path, monkeypatch):
     monkeypatch.setattr(so, "load_comparators", lambda r: {})
     so.main(["--oof", str(path), "--name", "x", "--model", "m"])
     assert not (tmp_path / "ledger.jsonl").exists()
+
+
+def test_cli_ledger_records_real_cost(tmp_path, monkeypatch):
+    rows = make_rows()
+    path = tmp_path / "oof.parquet"
+    oof_frame(rows, informative(rows)).to_parquet(path)
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(so, "LEDGER", ledger)
+    monkeypatch.setattr(so, "load_cv_rows", lambda: rows)
+    monkeypatch.setattr(so, "load_comparators", lambda r: {})
+    monkeypatch.setattr(so, "require_clean", lambda: "abc123")
+    so.main(
+        ["--oof", str(path), "--name", "lora_x", "--model", "m", "--cost-usd", "41.5", "--ledger"]
+    )
+    assert json.loads(ledger.read_text())["cost_usd"] == 41.5

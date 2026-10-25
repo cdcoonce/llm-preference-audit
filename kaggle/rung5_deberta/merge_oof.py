@@ -45,6 +45,8 @@ def collect_parts(dirs: list[Path]) -> list[tuple[int, pd.DataFrame, dict]]:
 
 
 def gpu_seconds(log: dict) -> float:
+    if "wall_seconds" in log:  # rung 6 logs the whole container-side wall time
+        return float(log["wall_seconds"])
     return float(log.get("train_stats", {}).get("train_seconds", 0.0)) + float(
         log.get("predict_seconds", 0.0)
     )
@@ -78,6 +80,7 @@ def main(argv=None) -> int:
         "n_rows": len(merged),
         "gpu_seconds": sum(gpu_seconds(log) for log in logs),
         "gpu_hours_estimate": sum(gpu_seconds(log) for log in logs) / 3600,
+        "est_cost_usd": sum(float(log.get("est_cost_usd", 0)) for log in logs),
     }
     (PRED_DIR / f"{a.tag}.run.json").write_text(json.dumps(run, indent=2) + "\n")
     print(f"merged folds {run['folds']} -> {out} ({len(merged)} cv rows, each id exactly once)")

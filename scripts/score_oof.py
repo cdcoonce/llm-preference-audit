@@ -239,7 +239,7 @@ def write_ledger_row(args, sha: str, summary: dict, pred_path: Path) -> bool:
         "config": args.name,
         "split": "cv-oof",
         "log_loss": summary["log_loss"]["matrix_cv"],
-        "cost_usd": 0,
+        "cost_usd": args.cost_usd,
         "gpu_hours": args.gpu_hours,
         "predictions_path": str(pred_path),
         "predictions_sha256": digest,
@@ -259,6 +259,7 @@ def main(argv: list[str]) -> None:
     p.add_argument("--name", required=True)
     p.add_argument("--model", required=True)
     p.add_argument("--gpu-hours", type=float, default=None)
+    p.add_argument("--cost-usd", type=float, default=0, help="real GPU cost for the ledger row")
     p.add_argument("--config-json", type=Path, default=None)
     p.add_argument("--summary", type=Path, default=None)
     p.add_argument("--ledger", action="store_true")
