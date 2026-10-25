@@ -1,0 +1,48 @@
+{
+  "mode": "probe",
+  "t": 1024,
+  "middle_share": 0.2,
+  "tiny": false,
+  "device": [
+    "Tesla T4",
+    "Tesla T4"
+  ],
+  "torch": "2.11.0+cu128",
+  "transformers": "5.16.1",
+  "python": "3.13.15",
+  "n_rows": 51848,
+  "hard_cut_share": 0.0007714858818083629,
+  "both_untruncated_share": 0.8568507946304582,
+  "git_sha": "5df120deee82f1bac37660c0481b5d6cba913f47",
+  "model": "microsoft/deberta-v3-base",
+  "non_finite_loss": null,
+  "train": {
+    "micro_batch": 4,
+    "accumulation": 4,
+    "optimizer_steps": 200,
+    "scaler_skipped_steps": 0,
+    "train_samples_per_s": 10.465842012720895,
+    "real_tokens_per_s": 5534.7868292579915,
+    "padded_tokens_per_s": 5611.907954198598,
+    "pad_waste_share": 0.013742407318514172,
+    "train_seconds": 308.8518226146698,
+    "peak_gpu_gib": 10.429518699645996
+  },
+  "infer": {
+    "rows": 2000,
+    "sequences_per_s": 28.973802572816368,
+    "rows_both_orders_per_s": 14.486901286408184,
+    "batch": 16,
+    "peak_gpu_gib": 3.5556201934814453,
+    "finite": true
+  },
+  "projection": {
+    "n_cv_rows_full": 51848,
+    "epochs": 2,
+    "gpu_hours_per_fold": 2.3395040797494464,
+    "gpu_hours_5_folds": 11.697520398747232,
+    "gpu_hours_5_folds_plus_ablation_fold": 14.03702447849668,
+    "wall_hours_on_2_gpus_5_folds": 7.01851223924834,
+    "note": "single-GPU measured rates; excludes model load, fitting and cache time"
+  }
+}
