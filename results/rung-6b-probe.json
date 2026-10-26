@@ -1,0 +1,187 @@
+{
+  "mode": "qprobe",
+  "tiny": false,
+  "seed": 2000,
+  "t": 2048,
+  "middle_share": 0.2,
+  "epochs": 1,
+  "micro_batch": 4,
+  "lr": 0.0001,
+  "git_sha": "2e895449c439a42381e52d84b8bdf5b00c24ed9b",
+  "model": "qwen-lm/qwen-3/transformers/1.7b/1",
+  "n_gpu": 2,
+  "gpu_names": [
+    "Tesla T4",
+    "Tesla T4"
+  ],
+  "gpu_total_gib": 14.56219482421875,
+  "precision": "fp16-autocast",
+  "fp32_head_norm": true,
+  "deadline_s": 3300.0,
+  "stages_done": [
+    "setup",
+    "attention",
+    "train",
+    "infer",
+    "ddp",
+    "verdict"
+  ],
+  "stage": "verdict",
+  "complete": true,
+  "finished_at": 1792987787.5540495,
+  "wall_seconds": 3270.185843706131,
+  "n_rows": 12000,
+  "hard_cut_share": 8.333333333333333e-05,
+  "both_untruncated_share": 0.9704166666666667,
+  "n_cv_full": 51848,
+  "n_encoded": 12000,
+  "data_load_seconds": 8.671154975891113,
+  "encode_seconds": 61.747424602508545,
+  "prep_seconds_full_cv_est": 275.46119420846304,
+  "template_overhead": 38,
+  "family": "qwen3",
+  "torch": "2.11.0+cu128",
+  "transformers": "5.20.2",
+  "python": "3.13.15",
+  "probe_steps_requested": 200,
+  "train_sample_rows": 3200,
+  "pad_token_id": 151643,
+  "bos_token_id": null,
+  "peft": "0.20.0",
+  "model_load_seconds": 7.216358184814453,
+  "base_dtype_census": [
+    "torch.float16",
+    "torch.float32"
+  ],
+  "attention_batch_attempts": [
+    {
+      "size": 8,
+      "oom": false
+    }
+  ],
+  "attention_check": {
+    "rows": 100,
+    "max_abs_logit_diff": 0.04979129508137703,
+    "max_abs_logit_eager": 3.4563448429107666,
+    "check_sensitive": true,
+    "tolerance": 0.02,
+    "choice": "eager"
+  },
+  "attention_decision": "eager",
+  "attn_implementation": "eager",
+  "dtype_census": {
+    "trainable": [
+      "torch.float32"
+    ],
+    "frozen": [
+      "torch.float16",
+      "torch.float32"
+    ]
+  },
+  "micro_batch_attempts": [
+    {
+      "size": 4,
+      "oom": false
+    }
+  ],
+  "micro_batch_chosen": 4,
+  "non_finite_loss": null,
+  "train": {
+    "micro_batch": 4,
+    "accumulation": 4,
+    "world_size": 1,
+    "requested_steps": 200,
+    "optimizer_steps": 200,
+    "optimizer_steps_per_s_warm": 0.08312356623098578,
+    "global_samples_per_s_warm": 1.3299770596957725,
+    "scaler_enabled": true,
+    "scaler_skipped_steps": 2,
+    "scaler_final_scale": 16384.0,
+    "grad_norm_max": 78.80201721191406,
+    "grad_norm_last": 7.483802795410156,
+    "train_samples": 3200,
+    "train_samples_per_s": 1.3299770596957725,
+    "train_real_tokens_per_s": 887.0074364105161,
+    "train_padded_tokens_per_s": 906.6790208713594,
+    "pad_waste_share": 0.021696304875277628,
+    "train_seconds": 2407.431902309002,
+    "eval_seconds": 0.0,
+    "mean_train_loss": 1.0877384953945874,
+    "peak_gpu_gib": 8.296579360961914
+  },
+  "peak_gpu_gib": 8.296579360961914,
+  "infer_batch_attempts": [
+    {
+      "size": 8,
+      "oom": false
+    }
+  ],
+  "infer": {
+    "rows": 1000,
+    "batch": 8,
+    "rows_per_s": 2.2857123616408024,
+    "sequences_per_s": 4.571424723281605,
+    "real_tokens_per_s": 3043.019152724356,
+    "peak_gpu_gib": 7.802326202392578,
+    "finite": true
+  },
+  "ddp": {
+    "ok": false,
+    "world_size": 2,
+    "attempts": [
+      {
+        "returncode": -9,
+        "timed_out": true,
+        "seconds": 299.7345700263977,
+        "env_extra": [],
+        "result_written": false
+      }
+    ],
+    "result": null,
+    "error": "no result written (hang, crash or timeout); see attempts"
+  },
+  "projection": {
+    "single": {
+      "fold0": {
+        "prep_seconds": 275.46119420846304,
+        "load_seconds": 7.216358184814453,
+        "train_seconds": 28068.574362131658,
+        "eval_seconds": 3629.363055133032,
+        "predict_seconds": 4536.70381891629,
+        "seconds": 36517.31878857426,
+        "hours": 10.14369966349285
+      },
+      "all_cv_train_seconds": 39266.808610909466,
+      "all_cv_train_hours": 10.907446836363741
+    },
+    "ddp": null,
+    "assumptions": {
+      "ddp_inference_speedup": 2,
+      "ddp_inference_measured": false,
+      "fold0_includes_inner_holdout_evals": 2
+    },
+    "best_fold0_mode": "single",
+    "best_fold0_hours": 10.14369966349285
+  },
+  "g0": {
+    "g0_pass": false,
+    "checks": {
+      "trained_all_steps": true,
+      "loss_finite": true,
+      "inference_finite": true,
+      "scaler_skips_ok": true,
+      "fits_memory": true,
+      "projected_fold0_within_cap": false
+    },
+    "reasons": [
+      "projected fold-0 hours 10.14369966349285 is not <= 10.0"
+    ],
+    "thresholds": {
+      "max_skip_share": 0.05,
+      "max_fold0_hours": 10.0,
+      "mem_fraction": 0.95
+    },
+    "scaler_skip_share": 0.01,
+    "best_fold0_hours": 10.14369966349285
+  }
+}
