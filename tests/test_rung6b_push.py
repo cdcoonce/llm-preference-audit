@@ -48,6 +48,8 @@ def test_rendered_script_pins_the_commit_installs_peft_and_forwards_the_probe_ar
     assert "git+https://github.com/o/r@abc123" in code and "--no-deps" in code
     assert "--ignore-requires-python" in code and "'peft'" in code and "'accelerate'" in code
     assert code.index("generated kernel header") < code.index("lora_kaggle import main")
+    # torchao 0.10 on Kaggle breaks peft/transformers imports: it must be removed before installs
+    assert code.index('"uninstall", "-y", "-q", "torchao"') < code.index("git+https://")
     for needle in ("'--mode', 'qprobe'", "'--kaggle'", "'--precision', 'fp16-autocast'",
                    "'--fp32-head-norm'", "'--git-sha', 'abc123'", "'--probe-steps', '200'",
                    "'--t', '2048'", "'--deadline-s', '3300'"):  # fmt: skip

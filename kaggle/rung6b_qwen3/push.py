@@ -100,6 +100,9 @@ def header(sha: str, repo: str, args: list[str]) -> str:
 import subprocess as _sp
 import sys as _sys
 
+# Kaggle's image ships torchao 0.10; current peft/transformers refuse any torchao < 0.16 once it is
+# importable (probe1 failed on this). Nothing here uses torchao, so remove it first.
+_sp.call([_sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"])
 _sp.check_call([_sys.executable, "-m", "pip", "install", "-q", "--no-deps",
                 "--ignore-requires-python",  # Kaggle may run Python 3.11
                 "git+https://github.com/{repo}@{sha}"])
