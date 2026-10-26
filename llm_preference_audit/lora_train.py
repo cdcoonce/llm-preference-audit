@@ -18,6 +18,15 @@ anything is restricted; only cv rows are ever encoded (the locked test split is 
 training or inference); the competition test.csv is never referenced; only ids, probabilities,
 flags and aggregates are written to --out-dir (dataset text lives in memory only).
 
+Rung 6b generalisation (Qwen3-1.7B on Kaggle T4s; the Gemma/Modal defaults are unchanged):
+`--model`, `--precision {bf16,fp16-autocast,fp32}`, `--fp32-head-norm`, Qwen3 as a second
+architecture (`--tiny-arch qwen3` for the CPU dry run), and the Kaggle-side probe in
+`lora_kaggle.py`, which reuses everything here. fp16-autocast: base weights fp16, LoRA params and
+the score head fp32, torch.autocast(fp16) + GradScaler, unscale before the 1.0 clip, and any
+non-finite loss stops the run with a first-overflow report (forward hooks, one re-run).
+Qwen3 is trained with the same plain template as Gemma, NOT its chat template (no <|im_start|>,
+no <think> tags): the task is classification from the last token, not generation.
+
 Dry-run tokenizer note: Gemma's tokenizer is gated, so `--tiny` uses the Qwen2.5 tokenizer (open).
 It has a pad token but no BOS, so the tiny template omits BOS; the real Gemma path requires one.
 """
@@ -25,9 +34,11 @@ It has a pad token but no BOS, so the tiny template omits BOS; the real Gemma pa
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -57,6 +68,7 @@ from llm_preference_audit.lora_cost import (
     est_cost_usd,
     project,
 )
+from llm_preference_audit.lora_g0 import attention_tolerance, choose_attention
 from llm_preference_audit.lora_inputs import Template, build_lora_ids, field_window, make_template
 from llm_preference_audit.scoring import log_loss
 from llm_preference_audit.truncate import MIDDLE_SHARE
@@ -71,6 +83,8 @@ FULL_SEED = SEED_BASE + 5
 SAMPLE_SEED = 20261024
 DEFAULT_MODEL = "google/gemma-2-9b-it"
 TINY_TOKENIZER = "Qwen/Qwen2.5-0.5B"
+TINY_QWEN3_TOKENIZER = "Qwen/Qwen3-1.7B"  # public; Qwen3's tokenizer has a pad token, no BOS
+PRECISIONS = ("bf16", "fp16-autocast", "fp32")
 LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
 ATTN_TOL = 1e-3  # max abs logit difference for preferring sdpa over eager
 ATTN_MIN_LOGIT_SCALE = 0.05  # below this the check cannot see a difference; stay on eager
@@ -78,7 +92,12 @@ CONFIG_LOG_KEYS = ("t", "middle_share", "epochs", "micro_batch", "lr", "git_sha"
 
 
 class NonFiniteLoss(RuntimeError):
-    pass
+    """A non-finite training loss. `first_overflow` is the hook report naming the first module
+    whose output held inf/nan when the failing micro-batch was re-run (None if not produced)."""
+
+    def __init__(self, msg: str, first_overflow: dict | None = None):
+        super().__init__(msg)
+        self.first_overflow = first_overflow
 
 
 class WorkerConfigMismatch(RuntimeError):
@@ -107,21 +126,49 @@ class Encoded(NamedTuple):
 # ---------------------------------------------------------------- inputs
 
 
+def model_family(args) -> str:
+    """ "qwen3" or "gemma2". Tiny runs follow --tiny-arch; a local model dir follows its
+    config.json model_type; otherwise the model name decides (Gemma is the default)."""
+    if args.tiny:
+        return getattr(args, "tiny_arch", "gemma2")
+    model_dir = getattr(args, "model_dir", "") or ""
+    cfg = Path(model_dir) / "config.json" if model_dir else None
+    if cfg is not None and cfg.is_file():
+        return "qwen3" if json.loads(cfg.read_text()).get("model_type") == "qwen3" else "gemma2"
+    return "qwen3" if "qwen3" in args.model.lower().replace("-", "") else "gemma2"
+
+
+def model_ref(args) -> str:
+    """What from_pretrained loads: the local directory when one is given, else the hub name."""
+    return getattr(args, "model_dir", "") or args.model
+
+
 def make_tokenizer(args):
+    if args.tiny:
+        name = TINY_QWEN3_TOKENIZER if model_family(args) == "qwen3" else TINY_TOKENIZER
+    else:
+        name = model_ref(args)
     tok = AutoTokenizer.from_pretrained(
-        TINY_TOKENIZER if args.tiny else args.model,
+        name,
         local_files_only=bool(getattr(args, "local_files_only", False)) and not args.tiny,
     )
     tok.model_max_length = 10**9  # we fit to the window ourselves
     if tok.pad_token_id is None:
         raise SystemExit("tokenizer has no pad token")
-    if not args.tiny and tok.bos_token_id is None:
+    # Gemma's template needs a BOS; Qwen3 has none (the template then starts at the prompt).
+    if not args.tiny and model_family(args) != "qwen3" and tok.bos_token_id is None:
         raise SystemExit("the real tokenizer must have a BOS token")
     return tok
 
 
 def tokenizer_template(tok) -> Template:
     return make_template(lambda s: tok(s, add_special_tokens=False).input_ids, tok.bos_token_id)
+
+
+def text_ids(tok, texts: list[str]) -> list[list[int]]:
+    """Token ids for dataset text. split_special_tokens keeps a literal "<|endoftext|>" in a
+    response from becoming Qwen's pad id (and a special token generally) mid-sequence."""
+    return tok(texts, add_special_tokens=False, split_special_tokens=True)["input_ids"]
 
 
 def encode(args, tok, template: Template, df: pd.DataFrame, manifest: pd.DataFrame) -> Encoded:
@@ -132,14 +179,14 @@ def encode(args, tok, template: Template, df: pd.DataFrame, manifest: pd.DataFra
         df = df[df["id"].isin(keep)]
 
     def count(s: str) -> int:
-        return len(tok(s, add_special_tokens=False).input_ids)
+        return len(text_ids(tok, [s])[0])
 
     t0 = time.time()
     rows = prepare_rows(df, manifest, count, field_window(args.t, template), args.middle_share)
     print(f"fitted {len(rows)} cv rows to T={args.t} in {time.time() - t0:.0f}s", flush=True)
 
     def ids(col: str) -> list:
-        enc = tok(rows[col].tolist(), add_special_tokens=False)["input_ids"]
+        enc = text_ids(tok, rows[col].tolist())
         return [np.asarray(x, dtype=np.int32) for x in enc]
 
     p, a, b = ids("prompt_text"), ids("a_text"), ids("b_text")
@@ -197,38 +244,155 @@ def tiny_config(vocab: int, pad_id: int, t: int, softcap: float = 50.0):
     )
 
 
-def build_tiny_model(vocab, pad_id, t, attn, dtype, softcap=50.0, seed=0):
-    from transformers import Gemma2ForSequenceClassification
+def tiny_config_qwen3(vocab: int, pad_id: int, t: int):
+    from transformers import Qwen3Config
 
+    return Qwen3Config(
+        vocab_size=vocab,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        max_position_embeddings=t + 16,
+        num_labels=3,
+        pad_token_id=pad_id,
+        use_cache=False,
+    )
+
+
+def build_tiny_model(vocab, pad_id, t, attn, dtype, softcap=50.0, seed=0, arch="gemma2"):
     torch.manual_seed(seed)
-    cfg = tiny_config(vocab, pad_id, t, softcap)
-    model = Gemma2ForSequenceClassification._from_config(cfg, attn_implementation=attn, dtype=dtype)
+    if arch == "qwen3":
+        from transformers import Qwen3ForSequenceClassification as Cls
+
+        cfg = tiny_config_qwen3(vocab, pad_id, t)
+    else:
+        from transformers import Gemma2ForSequenceClassification as Cls
+
+        cfg = tiny_config(vocab, pad_id, t, softcap)
+    model = Cls._from_config(cfg, attn_implementation=attn, dtype=dtype)
     with torch.no_grad():  # a larger head so logits (and an attention-impl difference) are visible
         model.score.weight.normal_(0, 1.0)
     return model
 
 
-def load_base(args, tok, attn: str):
-    """Base classifier in bf16 with the tokenizer's pad id; asserts nothing is fp32/fp16."""
+def precision_dtypes(args, device=None):
+    """(base weight dtype, autocast dtype or None) for `args.precision` on this device.
+
+    fp16 autocast does not exist on CPU, so a CPU dry run of fp16-autocast substitutes bf16 for
+    both (the GradScaler is then off; `--force-scaler` turns it on to exercise that code path).
+    """
+    precision = getattr(args, "precision", "bf16")
+    if precision == "bf16":
+        return torch.bfloat16, torch.bfloat16
+    if precision == "fp32":
+        return torch.float32, None
+    if precision != "fp16-autocast":
+        raise SystemExit(f"unknown --precision {precision!r}")
+    device = device or pick_device()
+    if device.type == "cuda":
+        return torch.float16, torch.float16
+    return torch.bfloat16, torch.bfloat16
+
+
+def fp16_emulated(args, device=None) -> bool:
+    return getattr(args, "precision", "bf16") == "fp16-autocast" and (
+        (device or pick_device()).type != "cuda"
+    )
+
+
+def dtype_label(dtype) -> str:
+    return {torch.bfloat16: "bf16", torch.float16: "fp16", torch.float32: "fp32"}[dtype]
+
+
+class Fp32Head(torch.nn.Linear):
+    """A Linear that always computes in fp32, even inside an autocast region (autocast would
+    otherwise cast its input and weight to fp16). Same parameter names as the Linear it replaces."""
+
+    def forward(self, x):
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            bias = None if self.bias is None else self.bias.float()
+            return torch.nn.functional.linear(x.float(), self.weight.float(), bias)
+
+
+def make_head_norm_fp32(model) -> None:
+    """Keep the final norm and the `score` head in fp32 (the T4 fp16 overflow guard)."""
+    old = model.score
+    head = Fp32Head(
+        old.in_features, old.out_features, bias=old.bias is not None, dtype=torch.float32
+    ).to(old.weight.device)
+    with torch.no_grad():
+        head.weight.copy_(old.weight.float())
+        if old.bias is not None:
+            head.bias.copy_(old.bias.float())
+    model.score = head
+    model.base_model.norm.float()  # RMSNorm then returns fp32 (fp32 weight * fp16 input)
+
+
+def load_base(args, tok, attn: str, device=None):
+    """Base classifier in the precision's weight dtype with the tokenizer's pad id; asserts every
+    parameter has exactly that dtype (bf16 by default: the Gemma/Modal behaviour)."""
+    base_dtype, _ = precision_dtypes(args, device)
     if args.tiny:
         model = build_tiny_model(
-            len(tok), tok.pad_token_id, args.t, attn, torch.bfloat16, args.tiny_softcap
+            len(tok),
+            tok.pad_token_id,
+            args.t,
+            attn,
+            base_dtype,
+            args.tiny_softcap,
+            arch=model_family(args),
         )
     else:
         model = AutoModelForSequenceClassification.from_pretrained(
-            args.model,
+            model_ref(args),
             num_labels=3,
-            dtype=torch.bfloat16,
+            dtype=base_dtype,
             attn_implementation=attn,
             pad_token_id=tok.pad_token_id,
             local_files_only=bool(getattr(args, "local_files_only", False)),
         )
     model.config.pad_token_id = tok.pad_token_id
     model.config.use_cache = False
-    bad = {str(p.dtype) for p in model.parameters() if p.dtype != torch.bfloat16}
+    bad = {str(p.dtype) for p in model.parameters() if p.dtype != base_dtype}
     if bad:
-        raise SystemExit(f"base parameters must all be bf16, found {sorted(bad)}")
+        raise SystemExit(
+            f"base parameters must all be {dtype_label(base_dtype)}, found {sorted(bad)}"
+        )
+    if getattr(args, "fp32_head_norm", False):
+        make_head_norm_fp32(model)
     return model
+
+
+_FP32_BASE_OK = re.compile(r"(^|\.)model\.norm\.weight$|(^|\.)score\.")
+
+
+def assert_precision_dtypes(pm, args, device=None) -> dict:
+    """Before training: every trainable parameter (LoRA + head) is fp32, and every frozen base
+    parameter has the precision's weight dtype, except the final norm and the head when
+    --fp32-head-norm keeps them fp32. Raises SystemExit; returns the dtype census."""
+    base_dtype, _ = precision_dtypes(args, device)
+    keep32 = getattr(args, "fp32_head_norm", False)
+    census: dict[str, set] = {"trainable": set(), "frozen": set()}
+    for n, p in pm.named_parameters():
+        if p.requires_grad:
+            census["trainable"].add(str(p.dtype))
+            if p.dtype != torch.float32:
+                raise SystemExit(f"trainable parameter {n} is {p.dtype}, must be fp32")
+        else:
+            census["frozen"].add(str(p.dtype))
+            allowed = {base_dtype} | (
+                {torch.float32} if keep32 and _FP32_BASE_OK.search(n) else set()
+            )
+            if p.dtype not in allowed:
+                raise SystemExit(f"frozen parameter {n} is {p.dtype}, expected {base_dtype}")
+    if keep32 and not isinstance(
+        getattr(pm.base_model.model, "score", None).modules_to_save["default"], Fp32Head
+    ):
+        raise SystemExit("--fp32-head-norm requested but the trainable head is not an Fp32Head")
+    return {k: sorted(v) for k, v in census.items()}
 
 
 def wrap_lora(model, args):
@@ -261,6 +425,7 @@ def wrap_lora(model, args):
         raise SystemExit("the classification head `score` is not trainable")
     if not any("lora_A" in n for n in trainable):
         raise SystemExit("no LoRA parameters are trainable")
+    assert_precision_dtypes(pm, args)
     return pm
 
 
@@ -275,8 +440,25 @@ def load_trainable_state(model, state: dict[str, torch.Tensor]) -> None:
             params[n].copy_(v.to(params[n].device))
 
 
-def autocast(device):
-    return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+def autocast(device, args=None):
+    """bf16 autocast unless `args.precision` says otherwise (fp16-autocast, or fp32: no autocast)."""
+    if args is None:
+        return torch.autocast(device_type=device.type, dtype=torch.bfloat16)
+    _, ac = precision_dtypes(args, device)
+    return torch.autocast(
+        device_type=device.type,
+        dtype=ac if ac is not None else torch.bfloat16,
+        enabled=ac is not None,
+    )
+
+
+def make_scaler(args, device):
+    """GradScaler for fp16-autocast on CUDA. Disabled otherwise (bf16/fp32 need none), where every
+    scaler call is a no-op and the loop is the original one. `--force-scaler` is a CPU test hook."""
+    enabled = (
+        getattr(args, "precision", "bf16") == "fp16-autocast" and device.type == "cuda"
+    ) or bool(getattr(args, "force_scaler", False))
+    return torch.amp.GradScaler(device.type, enabled=enabled)
 
 
 @torch.no_grad()
@@ -291,7 +473,7 @@ def predict(model, enc, idx, swap, tok, template, args, device) -> tuple[np.ndar
         tick(args, "inference")
         sel = order[s : s + args.infer_batch]
         ids, mask = collate([seqs[j] for j in sel], tok.pad_token_id, device)
-        with autocast(device):
+        with autocast(device, args):
             logits = model(input_ids=ids, attention_mask=mask).logits
         out[sel] = torch.softmax(logits.float(), dim=-1).cpu().numpy()
         tokens += int(mask.sum())
@@ -332,21 +514,130 @@ def peak_gib(device) -> float | None:
     return torch.cuda.max_memory_allocated() / GIB if device.type == "cuda" else None
 
 
+# ---------------------------------------------------------------- first-overflow report
+
+_HOOKED = re.compile(
+    r"(^|\.)(embed_tokens|norm|score)$"
+    r"|(^|\.)layers\.\d+$"
+    r"|(^|\.)layers\.\d+\.(self_attn|mlp|input_layernorm|post_attention_layernorm"
+    r"|pre_feedforward_layernorm|post_feedforward_layernorm)$"
+    r"|(^|\.)(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
+)
+
+
+def _nonfinite(out) -> dict | None:
+    """Counts of inf/nan in a module output (tensor, or any nesting of tuple/list/dict), else None."""
+    n_nan = n_inf = 0
+    absmax = 0.0
+    stack = [out]
+    while stack:
+        x = stack.pop()
+        if isinstance(x, torch.Tensor):
+            if x.is_floating_point() and x.numel():
+                n_nan += int(torch.isnan(x).sum())
+                n_inf += int(torch.isinf(x).sum())
+                fin = x[torch.isfinite(x)]
+                if fin.numel():
+                    absmax = max(absmax, float(fin.abs().max()))
+        elif isinstance(x, dict):
+            stack.extend(x.values())
+        elif isinstance(x, (tuple, list)):
+            stack.extend(x)
+    if n_nan or n_inf:
+        return {"n_nan": n_nan, "n_inf": n_inf, "absmax_finite": absmax}
+    return None
+
+
+def first_overflow_report(model, ids, mask, args, device) -> dict:
+    """Re-run one micro-batch forward-only with hooks on the embeddings, decoder layers, their
+    attention/MLP/norm sub-blocks, the linears, the final norm and the head. A forward hook fires
+    when a module FINISHES, so the first hit is the innermost module that produced an inf/nan.
+    Returns {"first_overflow_module": name or None, "reproduced": bool, ...}."""
+    hits: list[dict] = []
+    handles = []
+
+    def make(name):
+        def hook(_module, _inputs, output):
+            if not hits:
+                bad = _nonfinite(output)
+                if bad:
+                    hits.append({"module": name, **bad})
+
+        return hook
+
+    for name, mod in model.named_modules():
+        if name and _HOOKED.search(name):
+            handles.append(mod.register_forward_hook(make(name)))
+    was_training = model.training
+    model.eval()
+    try:
+        with torch.no_grad(), autocast(device, args):
+            out = model(input_ids=ids, attention_mask=mask).logits
+        logits_finite = bool(torch.isfinite(out).all())
+    finally:
+        for h in handles:
+            h.remove()
+        model.train(was_training)
+    first = hits[0] if hits else None
+    return {
+        "first_overflow_module": first["module"] if first else None,
+        "reproduced": first is not None,
+        "detail": first,
+        "rerun_logits_finite": logits_finite,
+        "hooked_modules": len(handles),
+        "micro_batch_rows": int(ids.shape[0]),
+        "micro_batch_max_len": int(ids.shape[1]),
+    }
+
+
+def _all_finite(finite: bool, device, world: int) -> bool:
+    """Every rank must agree on a non-finite loss, or the others hang in the next all-reduce."""
+    if world <= 1:
+        return finite
+    import torch.distributed as dist
+
+    flag = torch.tensor([1 if finite else 0], device=device)
+    dist.all_reduce(flag, op=dist.ReduceOp.MIN)
+    return bool(flag.item())
+
+
 # ---------------------------------------------------------------- training
 
 
-def train(model, enc, template, train_idx, eval_idx, tok, args, seed, device, max_steps=None):
+def train(
+    model,
+    enc,
+    template,
+    train_idx,
+    eval_idx,
+    tok,
+    args,
+    seed,
+    device,
+    max_steps=None,
+    *,
+    world: int = 1,
+    rank: int = 0,
+    fwd=None,
+):
     """One epoch. With `eval_idx`, scores the inner holdout at 50% and 100% of the epoch and keeps
-    the better trainable state (LoRA + head only). Returns (history, best, stats)."""
+    the better trainable state (LoRA + head only). Returns (history, best, stats).
+
+    `world`/`rank`/`fwd` are the DDP hooks (rung 6b): `fwd` is the DDP-wrapped module used for the
+    forward pass, each optimizer step takes EFFECTIVE_BATCH rows in total, and rank r processes
+    micro-batches r, r+world, ... of every group. With world=1 this is the original loop."""
     from transformers import get_cosine_schedule_with_warmup
 
+    fwd = fwd if fwd is not None else model
     micro = args.micro_batch
-    accum = max(1, EFFECTIVE_BATCH // micro)
+    if EFFECTIVE_BATCH % (micro * world):
+        raise SystemExit(f"--micro-batch {micro} x {world} ranks must divide {EFFECTIVE_BATCH}")
+    accum = max(1, EFFECTIVE_BATCH // (micro * world))
     lengths = np.minimum(
         enc.meta[["n_prompt", "n_a", "n_b"]].to_numpy()[train_idx].sum(axis=1) + template.overhead,
         args.t,
     )
-    steps_per_epoch = math.ceil(math.ceil(len(train_idx) / micro) / accum)
+    steps_per_epoch = math.ceil(math.ceil(len(train_idx) / micro) / (accum * world))
     total_steps = min(max_steps, steps_per_epoch) if max_steps else steps_per_epoch
     eval_at = {}
     if eval_idx is not None and len(eval_idx) and not max_steps:
@@ -354,12 +645,18 @@ def train(model, enc, template, train_idx, eval_idx, tok, args, seed, device, ma
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=args.lr, weight_decay=WEIGHT_DECAY)
     sched = get_cosine_schedule_with_warmup(opt, int(WARMUP * total_steps), total_steps)
+    scaler = make_scaler(args, device)
+    skipped_steps = 0
+    grad_norm_max = grad_norm_last = 0.0
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
     swaps = np.random.default_rng(seed).random(len(train_idx)) < 0.5
     batches = length_grouped_batches(lengths, micro, seed)
-    groups = [batches[i : i + accum] for i in range(0, len(batches), accum)]
+    groups = [batches[i : i + accum * world] for i in range(0, len(batches), accum * world)]
+    if world > 1:  # every rank needs the same number of micro-batches in a step
+        groups = [g[: len(g) - len(g) % world] for g in groups]
+        groups = [g for g in groups if g]
     history, best = [], {"loss": float("inf"), "epoch": None, "state": None}
     step = samples = real_tokens = padded_tokens = 0
     loss_sum, loss_n = 0.0, 0
@@ -368,26 +665,43 @@ def train(model, enc, template, train_idx, eval_idx, tok, args, seed, device, ma
     model.train()
     for group in groups:
         t_step = time.perf_counter()
-        for bidx in group:
+        mine = group[rank::world] if world > 1 else group
+        for k, bidx in enumerate(mine):
             tick(args, "train")
             pairs = [
                 make_seq(enc, int(train_idx[j]), bool(swaps[j]), template, args.t) for j in bidx
             ]
             ids, mask = collate([s for s, _ in pairs], tok.pad_token_id, device)
             y = torch.tensor([y for _, y in pairs], device=device)
-            with autocast(device):
-                logits = model(input_ids=ids, attention_mask=mask).logits
-            loss = torch.nn.functional.cross_entropy(logits.float(), y)
-            if not torch.isfinite(loss):
-                raise NonFiniteLoss(f"non-finite loss at step {step}")
-            (loss / len(group)).backward()
+            sync_ctx = (
+                fwd.no_sync() if (world > 1 and k < len(mine) - 1) else contextlib.nullcontext()
+            )
+            with sync_ctx:
+                with autocast(device, args):
+                    logits = fwd(input_ids=ids, attention_mask=mask).logits
+                loss = torch.nn.functional.cross_entropy(logits.float(), y)
+                if not _all_finite(bool(torch.isfinite(loss)), device, world):
+                    report = first_overflow_report(model, ids, mask, args, device)
+                    raise NonFiniteLoss(
+                        f"non-finite loss at step {step}; first overflow: "
+                        f"{report['first_overflow_module']}",
+                        first_overflow=report | {"step": step},
+                    )
+                scaler.scale(loss / len(mine)).backward()
             loss_sum += loss.item() * len(bidx)
             loss_n += len(bidx)
             samples += len(bidx)
             real_tokens += int(mask.sum())
             padded_tokens += int(mask.numel())
-        torch.nn.utils.clip_grad_norm_(params, GRAD_CLIP)
-        opt.step()
+        scaler.unscale_(opt)  # BEFORE the clip: the 1.0 bound is on true, not scaled, gradients
+        gn = float(torch.nn.utils.clip_grad_norm_(params, GRAD_CLIP))
+        if math.isfinite(gn):
+            grad_norm_max, grad_norm_last = max(grad_norm_max, gn), gn
+        scale_before = scaler.get_scale()
+        scaler.step(opt)
+        scaler.update()
+        if scaler.is_enabled() and scaler.get_scale() < scale_before:
+            skipped_steps += 1  # the scaler found inf/nan gradients and skipped this step
         sched.step()
         opt.zero_grad(set_to_none=True)
         step += 1
@@ -423,10 +737,24 @@ def train(model, enc, template, train_idx, eval_idx, tok, args, seed, device, ma
         sps = (samples - warm_samples) / (train_time - warm_time)
     else:
         sps = samples / max(train_time, 1e-9)
+    warm_steps_per_s = (
+        (step - 2) / (train_time - warm_time)
+        if warm_time is not None and step > 2 and train_time > warm_time
+        else step / max(train_time, 1e-9)
+    )
     stats = {
         "micro_batch": micro,
         "accumulation": accum,
+        "world_size": world,
+        "requested_steps": total_steps,
         "optimizer_steps": step,
+        "optimizer_steps_per_s_warm": warm_steps_per_s,
+        "global_samples_per_s_warm": warm_steps_per_s * EFFECTIVE_BATCH,
+        "scaler_enabled": scaler.is_enabled(),
+        "scaler_skipped_steps": skipped_steps,
+        "scaler_final_scale": scaler.get_scale() if scaler.is_enabled() else None,
+        "grad_norm_max": grad_norm_max,
+        "grad_norm_last": grad_norm_last,
         "train_samples": samples,
         "train_samples_per_s": sps,
         "train_real_tokens_per_s": real_tokens / max(train_time, 1e-9),
@@ -455,6 +783,13 @@ def expected_config(args, epochs: int = 1) -> dict:
     }
 
 
+def dtype_description(args, device) -> str:
+    base, ac = precision_dtypes(args, device)
+    head = "; final norm+head fp32" if getattr(args, "fp32_head_norm", False) else ""
+    auto = f"{dtype_label(ac)} autocast" if ac is not None else "no autocast"
+    return f"base {dtype_label(base)}; LoRA+head fp32 masters; {auto}{head}"
+
+
 def base_log(args, device, attn: str, template: Template) -> dict:
     log = {"tag": args.tag} | expected_config(args)
     log |= {
@@ -462,7 +797,11 @@ def base_log(args, device, attn: str, template: Template) -> dict:
         "lora_alpha": args.lora_alpha,
         "lora_dropout": args.lora_dropout,
         "attn_implementation": attn,
-        "dtype": "base bf16; LoRA+head fp32 masters; bf16 autocast",
+        "dtype": dtype_description(args, device),
+        "precision": getattr(args, "precision", "bf16"),
+        "fp32_head_norm": bool(getattr(args, "fp32_head_norm", False)),
+        "fp16_emulated_on_cpu": fp16_emulated(args, device),
+        "family": model_family(args),
         "template_overhead": template.overhead,
         "price_per_hour": PRICE_PER_HOUR,
         "deadline_s": getattr(args, "deadline_s", 0.0) or None,
@@ -523,19 +862,21 @@ def attention_check(model, enc, tok, template, args, device, n_rows: int) -> dic
             tick(args, "attention")
             sel = order[s : s + args.infer_batch]
             ids, mask = collate([seqs[j] for j in sel], tok.pad_token_id, device)
-            with autocast(device):
+            with autocast(device, args):
                 logits[sel] = model(input_ids=ids, attention_mask=mask).logits.float().cpu().numpy()
         outs[impl] = logits
     diff = float(np.abs(outs["eager"] - outs["sdpa"]).max())
     scale = float(np.abs(outs["eager"]).max())
     sensitive = scale >= ATTN_MIN_LOGIT_SCALE
-    choice = "sdpa" if (diff <= ATTN_TOL and sensitive) else "eager"
+    # Gemma (bf16): tight, because sdpa drops its softcap. fp16-autocast: 2e-2, see lora_g0.
+    tol = attention_tolerance(getattr(args, "precision", "bf16"))
+    choice = choose_attention(diff, scale, tol, ATTN_MIN_LOGIT_SCALE)
     return {
         "rows": len(seqs),
         "max_abs_logit_diff": diff,
         "max_abs_logit_eager": scale,
         "check_sensitive": sensitive,
-        "tolerance": ATTN_TOL,
+        "tolerance": tol,
         "choice": choice,
     }
 
@@ -827,12 +1168,23 @@ def run_selftest(args) -> int:
 
 def parse(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--mode", choices=["probe", "fold", "full", "selftest"], required=True)
+    ap.add_argument(
+        "--mode",
+        choices=["probe", "fold", "full", "selftest", "qprobe", "ddp-child"],
+        required=True,
+    )
     ap.add_argument("--fold", type=int, default=0)
     ap.add_argument("--t", type=int, default=2048)
     ap.add_argument("--middle-share", type=float, default=MIDDLE_SHARE)
     ap.add_argument("--model", default=DEFAULT_MODEL)
-    ap.add_argument("--tiny", action="store_true", help="tiny from-scratch Gemma2 (dry run)")
+    ap.add_argument("--tiny", action="store_true", help="tiny from-scratch model (dry run)")
+    ap.add_argument("--tiny-arch", choices=["gemma2", "qwen3"], default="gemma2")
+    ap.add_argument("--precision", choices=PRECISIONS, default="bf16")
+    ap.add_argument(
+        "--fp32-head-norm", action="store_true", help="keep the final norm and score head in fp32"
+    )
+    ap.add_argument("--force-scaler", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--model-dir", default="", help="local model directory (Kaggle mount)")
     ap.add_argument("--tiny-softcap", type=float, default=0.5, help=argparse.SUPPRESS)
     ap.add_argument("--max-rows", type=int, default=0, help="restrict cv rows (dry runs)")
     ap.add_argument("--probe-steps", type=int, default=200)
@@ -857,16 +1209,30 @@ def parse(argv=None) -> argparse.Namespace:
     )
     ap.add_argument("--tag", default="")
     ap.add_argument("--git-sha", default="")
+    # rung 6b (Kaggle probe, lora_kaggle.py)
+    ap.add_argument("--kaggle", action="store_true", help="discover model and data under /kaggle")
+    ap.add_argument("--probe-encode-rows", type=int, default=12000)
+    ap.add_argument("--qattn-rows", type=int, default=100)
+    ap.add_argument("--ddp-steps", type=int, default=50)
+    ap.add_argument("--ddp-timeout-s", type=float, default=900.0)
+    ap.add_argument("--no-ddp", action="store_true")
+    ap.add_argument("--ddp-cpu-procs", type=int, default=0, help=argparse.SUPPRESS)
+    ap.add_argument("--ddp-cache", default="", help=argparse.SUPPRESS)
     return ap.parse_args(argv)
 
 
 def main(argv=None) -> int:
-    args = parse(argv)
+    return run(parse(argv))
+
+
+def run(args) -> int:
     args.deadline = Deadline(args.deadline_s)  # starts now: the budget covers data prep and load
     if EFFECTIVE_BATCH % args.micro_batch:
         raise SystemExit("--micro-batch must divide 16")
     if not 0 <= args.fold <= 4:
         raise SystemExit("--fold must be 0-4")
+    if args.mode in ("qprobe", "ddp-child"):  # rung 6b: Kaggle probe (lora_kaggle owns it)
+        raise SystemExit(f"--mode {args.mode} runs through llm_preference_audit.lora_kaggle")
     return {"probe": run_probe, "fold": run_fold, "full": run_full, "selftest": run_selftest}[
         args.mode
     ](args)
